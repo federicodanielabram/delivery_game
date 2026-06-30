@@ -1,0 +1,9 @@
+# Godot cache y compilados
+.godot/
+
+# Exports
+export_presets.cfg
+*.exe
+*.x86_64
+*.dmg
+*.apk
