@@ -7,3 +7,10 @@ export_presets.cfg
 *.x86_64
 *.dmg
 *.apk
+
+# Dependencias de las tools (regenerables con npm install)
+node_modules/
+
+# Videos de trabajo en la raíz (fuentes crudas, no van al repo)
+/0630.mp4
+/verde2.mp4

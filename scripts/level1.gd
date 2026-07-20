@@ -1,7 +1,13 @@
 extends Node2D
 
-const THUG_SCENE := preload("res://scenes/enemies/Thug.tscn")
-const HUD_SCENE  := preload("res://scenes/HUD.tscn")
+const THUG_SCENE         := preload("res://scenes/enemies/Thug.tscn")
+const WAITER_SCENE       := preload("res://scenes/enemies/Waiter.tscn")
+const WAITER_DARK_SCENE  := preload("res://scenes/enemies/WaiterDark.tscn")
+const WAITER_LIGHT_SCENE := preload("res://scenes/enemies/WaiterLight.tscn")
+const HUD_SCENE          := preload("res://scenes/HUD.tscn")
+
+# Largo del nivel (6x el original de 2560)
+const LEVEL_LENGTH := 15360.0
 
 # Colores de obstáculos
 const COL_PLATFORM := Color(0.15, 0.15, 0.2,  1.0)
@@ -21,28 +27,53 @@ const PLATFORMS := [
 ]
 
 func _ready() -> void:
-	for p in PLATFORMS:
-		_create_platform(p[0], p[1], p[2])
+	#for p in PLATFORMS:
+		#_create_platform(p[0], p[1], p[2])
 
-	# Cajas para saltar
-	_create_box(300, 24)
-	_create_box(500, 24)
-	_create_box(900, 32)
+	## Cajas para saltar
+	#_create_box(300, 24)
+	#_create_box(500, 24)
+	#_create_box(900, 32)
 
-	# Túnel estrecho (hay que agacharse)
-	_create_tunnel(650, 120, 155)
+	## Túnel estrecho (hay que agacharse)
+	#_create_tunnel(650, 120, 155)
 
-	# Puerta de madera (hay que golpear con Z)
-	_create_door(1000)
+	## Puerta de madera (hay que golpear con Z)
+	#_create_door(1000)
 
 	# HUD
 	var hud: Node = HUD_SCENE.instantiate()
 	add_child(hud)
 
-	# Thugs — enemigos específicos de este nivel
-	_spawn_thug(380)
-	_spawn_thug(680)
-	_spawn_thug(1050)
+	# Extender el límite de cámara al largo del nivel
+	_set_camera_limit()
+
+	# Mozos (tiran platos) repartidos a lo largo del nivel, antes del boss (~14600)
+	_spawn_waiter(3000)
+	_spawn_waiter_light(8000)
+	_spawn_waiter_dark(13000)
+
+func _set_camera_limit() -> void:
+	var player := get_tree().get_first_node_in_group("player") as Node2D
+	if not player: return
+	var cam := player.get_node_or_null("Camera2D") as Camera2D
+	if cam:
+		cam.limit_right = int(LEVEL_LENGTH)
+
+func _spawn_waiter(x: float) -> void:
+	var waiter: Node = WAITER_SCENE.instantiate()
+	(waiter as Node2D).position = Vector2(x, 600.0)
+	add_child(waiter)
+
+func _spawn_waiter_dark(x: float) -> void:
+	var waiter: Node = WAITER_DARK_SCENE.instantiate()
+	(waiter as Node2D).position = Vector2(x, 600.0)
+	add_child(waiter)
+
+func _spawn_waiter_light(x: float) -> void:
+	var waiter: Node = WAITER_LIGHT_SCENE.instantiate()
+	(waiter as Node2D).position = Vector2(x, 600.0)
+	add_child(waiter)
 
 func _spawn_thug(x: float) -> void:
 	var thug: Node = THUG_SCENE.instantiate()

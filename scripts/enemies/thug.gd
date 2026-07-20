@@ -166,10 +166,11 @@ func _do_attack(delta: float) -> void:
 		state = State.CHASE if (player and _player_dist() <= DETECT_RANGE * 1.6) else State.PATROL
 
 # ── Daño recibido ──────────────────────────────────────────────────────────
-func take_damage(amount: int, from_right: bool) -> void:
+func take_damage(amount: int, from_right: bool, kb: float = -1.0) -> void:
 	if state == State.DEAD: return
 	hp          -= amount
-	knockback.x  = 280.0 * (1.0 if from_right else -1.0)
+	var mag: float = 280.0 if kb < 0.0 else kb
+	knockback.x  = mag * (-1.0 if from_right else 1.0)   # empuja lejos del jugador
 	_refresh_hp_bar()
 	if hp <= 0:
 		_die()

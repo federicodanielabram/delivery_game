@@ -1,24 +1,57 @@
 extends CharacterBody2D
 
 # ── Física ───────────────────────────────────────────────────────────────────
-const MAX_SPEED    := 90.0
-const ACCELERATION := 500.0
+const MAX_SPEED    := 380.0
+const ACCELERATION := 2000.0
 const FRICTION     := 600.0
-const JUMP_FORCE   := -290.0
-const GRAVITY      := 750.0
+const JUMP_FORCE          := -531.0
+const RUN_JUMP_FORCE      := -531.0
+const RUN_JUMP_SPEED      := 500.0   # velocidad horizontal del salto desde run (más envión que correr)
+const IDLE_JUMP_AIR_SPEED := 350.0   # salto desde idle: velocidad al presionar dirección en el aire (casi el doble del walk)
+const AIR_BRAKE           := 1200.0  # en el aire, presionar la dirección inversa frena fuerte (en vez de darse vuelta)
+const JUMP_SQUAT_DUR      := 0.133
+const RUN_JUMP_SQUAT_DUR  := 2.0 / 24.0
+const GRAVITY      := 850.0
 const ROLL_SPEED   := 160.0
 const ROLL_DIST    := 48.0
 const ROLL_PAUSE   := 0.35
 
 # ── Combate ──────────────────────────────────────────────────────────────────
-const COMBO_WINDOW  := 0.50
+const COMBO_WINDOW    := 0.50
+const COMBO_HIT_DUR   := 0.38
+const COMBO_COOLDOWN  := 0.22
+
+const JAB_FRAMES      := 17
+const HOOK_FRAMES     := 12
+const UPPERCUT_FRAMES := 47
+const KICK_FRAMES     := 31
+const JAB_FPS         := 44.74   # 17 frames / 0.38s
+const HOOK_FPS        := 31.58   # 12 frames / 0.38s
+const UPPERCUT_FPS    := 60.0    # velocidad natural, dura 47/60 ≈ 0.78s
+const KICK_FPS        := 88.57   # 31 frames / 0.35s
+const FLYING_KICK_FRAMES := 47
+const FLYING_KICK_FPS    := 60.0   # 47 frames / ~0.78s (recortado, sin idle de relleno)
+const FLYING_KICK_IMPACT := 20     # frame con la pierna extendida: ahi registra el golpe
+const FLYING_KICK_KB     := 0.0    # 0 = enemigo plantado (no patina). Subir para empujarlo hacia atras
+const FLYING_KICK_RANGE  := 150.0  # alcance del golpe (la pierna llega lejos)
+const AIR_KICK_FRAMES     := 57
+const AIR_KICK_FPS        := 60.0  # velocidad de la patada (0→freeze)
+const AIR_KICK_RECOVER_FPS := 90.0 # tras el freeze (retracción/descenso/aterrizaje) más rápido
+const AIR_KICK_IMPACT     := 16    # frame 17: pierna extendida (registra el golpe)
+const AIR_KICK_HOLD       := 16    # frame 17: frena la patada en el aire hasta pegar o acercarse al piso
+const AIR_KICK_NEAR_GROUND := 80.0 # distancia al piso para empezar a descender/aterrizar
+const AIR_KICK_FORWARD    := 240.0 # px/s hacia adelante (dive): avanza en el aire hasta tocar piso
+const AIR_KICK_KB         := 0.0   # 0 = enemigo plantado (consistente con el combo)
+const HITSTOP_DUR        := 0.08   # freeze frame al conectar
+const SHAKE_AMOUNT       := 9.0    # amplitud inicial del screen shake
+const SHAKE_DECAY        := 45.0
 const MAX_HP        := 5
 const IFRAME_DUR    := 1.0    # segundos de invulnerabilidad tras recibir golpe
-const HIT_RANGE_X   := 44.0   # alcance horizontal del golpe
+const HIT_RANGE_X   := 112.0  # alcance horizontal del golpe
 const HIT_RANGE_Y   := 52.0   # tolerancia vertical
 
-enum State      { IDLE, WALK, JUMP, FALL, CROUCH, ROLL, ATTACKING, AIR_ATTACKING, CROUCH_ATTACKING }
-enum AttackType { JAB, HOOK, UPPERCUT, SWEEP, KICK, CROUCH_KICK, AIR_PUNCH, AIR_DOWN_KICK }
+enum State      { IDLE, WALK, RUN, STOP, RUN_JUMP, JUMP_SQUAT, JUMP, FALL, LAND, JUMP_TO_CROUCH, CROUCH, CROUCH_WALK, STAND, ROLL, ATTACKING, AIR_ATTACKING, CROUCH_ATTACKING, AIR_KICKING }
+enum AttackType { JAB, HOOK, UPPERCUT, SWEEP, KICK, CROUCH_KICK, AIR_PUNCH, AIR_DOWN_KICK, THROW, FLYING_KICK }
 
 var state          := State.IDLE
 var facing_right   := true
@@ -27,49 +60,210 @@ var roll_dir             := 1.0
 var crouch_roll_cooldown := 0.0
 
 var current_attack := AttackType.JAB
-var combo_step     := 0
-var attack_timer   := 0.0
-var combo_timer    := 0.0
-var attack_queued  := false
+var combo_step          := 0
+var attack_timer        := 0.0
+var combo_timer         := 0.0
+var attack_queued       := false
+var combo_cooldown_timer := 0.0
 
 var hp             := MAX_HP
 var iframe_timer   := 0.0
 var knockback_vel  := 0.0     # velocidad horizontal de empuje al recibir daño
+var hitstun_timer  := 0.0     # bloqueo de input mientras dura el empuje
 
 @onready var sprite:    Sprite2D         = $Sprite2D
 @onready var collision: CollisionShape2D = $CollisionShape2D
+@onready var camera:    Camera2D         = $Camera2D
 
-var tex_idle:   Texture2D
-var tex_walk:   Texture2D
-var tex_jump:   Texture2D
-var tex_crouch: Texture2D
+var shake_amount     := 0.0
+var _cam_base_offset := Vector2.ZERO
+var _hitstop_active  := false
+
+@export var has_bengala: bool = false
+var _bengala: Node2D = null
+
 var tex_attack: Texture2D
+
+var tex_jab_frames: Array[Texture2D] = []
+var jab_frame_index := 0
+var jab_frame_timer := 0.0
+
+var tex_hook_frames: Array[Texture2D] = []
+var hook_frame_index := 0
+var hook_frame_timer := 0.0
+
+var tex_uppercut_frames: Array[Texture2D] = []
+var uppercut_frame_index := 0
+var uppercut_frame_timer := 0.0
+
+var tex_kick_frames: Array[Texture2D] = []
+var kick_frame_index := 0
+var kick_frame_timer := 0.0
+
+var tex_flying_kick_frames: Array[Texture2D] = []
+var flying_kick_frame_index := 0
+var flying_kick_frame_timer := 0.0
+var flying_kick_hit_done := false
+
+var tex_air_kick_frames: Array[Texture2D] = []
+var air_kick_frame_index := 0
+var air_kick_frame_timer := 0.0
+var air_kick_connected := false
+var air_kick_speed := 0.0   # velocidad del dive: hereda el envión de entrada (mín. AIR_KICK_FORWARD)
+
+const CAN_SCENE := preload("res://scenes/Can.tscn")
+const THROW_FRAMES     := 50
+const THROW_FPS        := 88.0
+const THROW_SPAWN_FRAME := 19   # frame donde suelta la lata
+var tex_throw_frames: Array[Texture2D] = []
+var throw_frame_index := 0
+var throw_frame_timer := 0.0
+var throw_can_spawned := false
+
+var tex_jump_to_crouch_frames: Array[Texture2D] = []
+var jump_to_crouch_frame_index := 0
+var jump_to_crouch_frame_timer := 0.0
+const JUMP_TO_CROUCH_FPS := 30.0
+
+var tex_crouch_frames: Array[Texture2D] = []
+var crouch_frame_index := 0
+var crouch_frame_timer := 0.0
+var crouch_fast        := false
+const CROUCH_FPS      := 30.0
+const CROUCH_FAST_FPS := 90.0
+
+var tex_stand_frames: Array[Texture2D] = []
+var stand_frame_index := 0
+var stand_frame_timer := 0.0
+var stand_fast        := false
+const STAND_FPS      := 30.0
+const STAND_FAST_FPS := 60.0
+
+var tex_crouch_walk_frames: Array[Texture2D] = []
+var crouch_walk_frame_index := 0
+var crouch_walk_frame_timer := 0.0
+const CROUCH_WALK_FPS := 30.0
+
+var tex_idle_frames: Array[Texture2D] = []
+var idle_frame_index  := 0
+var idle_frame_timer  := 0.0
+const IDLE_FPS := 30.0
+
+var tex_walk_frames: Array[Texture2D] = []
+var walk_frame_index  := 0
+var walk_frame_timer  := 0.0
+const WALK_FPS := 50.0
+
+
+var tex_run_frames: Array[Texture2D] = []
+var run_frame_index  := 0
+var run_frame_timer  := 0.0
+const RUN_FPS := 30.0
+
+var tex_stop_frames: Array[Texture2D] = []
+var stop_frame_index := 0
+var stop_frame_timer := 0.0
+var stop_from_walk   := false
+const STOP_FPS      := 30.0
+const STOP_WALK_FPS := 17.0
+
+var tex_run_jump_frames: Array[Texture2D] = []
+var run_jump_frame_index := 0
+var run_jump_frame_timer := 0.0
+var run_jump_hold_timer  := 0.0
+const RUN_JUMP_FPS        := 30.0
+const RUN_JUMP_HOLD_DUR   := 0.20
+
+var tex_jump_frames: Array[Texture2D] = []
+var jump_frame_index  := 0
+var jump_frame_timer  := 0.0
+var jump_squat_timer := 0.0
+var jump_from_run    := false
+var jump_from_walk   := false
+var jump_from_idle   := false
+const JUMP_FPS := 24.0
 
 func _ready() -> void:
 	add_to_group("player")
-	tex_idle   = load("res://assets/sprites/player/player_idle.png")
-	tex_walk   = load("res://assets/sprites/player/player_walk.png")
-	tex_jump   = load("res://assets/sprites/player/player_jump.png")
-	tex_crouch = load("res://assets/sprites/player/player_crouch.png")
+	z_index = 1
+	_cam_base_offset = camera.offset
 	tex_attack = load("res://assets/sprites/player/player_punch.png")
-	sprite.texture = tex_idle
+	for i in range(1, JAB_FRAMES + 1):
+		tex_jab_frames.append(load("res://assets/sprites/player/jab/jab____%03d.png" % i))
+	for i in range(1, HOOK_FRAMES + 1):
+		tex_hook_frames.append(load("res://assets/sprites/player/hook/hook____%03d.png" % i))
+	for i in range(1, UPPERCUT_FRAMES + 1):
+		tex_uppercut_frames.append(load("res://assets/sprites/player/uppercut/uppercut____%03d.png" % i))
+	for i in range(1, KICK_FRAMES + 1):
+		tex_kick_frames.append(load("res://assets/sprites/player/kick/kick____%03d.png" % i))
+	for i in range(1, FLYING_KICK_FRAMES + 1):
+		tex_flying_kick_frames.append(load("res://assets/sprites/player/flying_kick/flying_kick_%03d.png" % i))
+	for i in range(1, AIR_KICK_FRAMES + 1):
+		tex_air_kick_frames.append(load("res://assets/sprites/player/air_kick/air_kick_%03d.png" % i))
+	for i in range(1, THROW_FRAMES + 1):
+		tex_throw_frames.append(load("res://assets/sprites/player/throw_cans/throw_cans_%03d.png" % i))
+	for i in range(1, 40):
+		tex_idle_frames.append(load("res://assets/sprites/player/idle/idle__%03d.png" % i))
+	for i in range(1, 51):
+		tex_walk_frames.append(load("res://assets/sprites/player/walk/walk_%03d.png" % i))
+	for i in range(1, 21):
+		tex_run_frames.append(load("res://assets/sprites/player/run/run__%03d.png" % i))
+	for i in range(1, 24):
+		tex_stop_frames.append(load("res://assets/sprites/player/stop/stop__%03d.png" % i))
+	for i in range(2, 26):
+		tex_run_jump_frames.append(load("res://assets/sprites/player/run_jump/run_jump__%03d.png" % i))
+	for i in range(1, 38):
+		tex_jump_frames.append(load("res://assets/sprites/player/jump/jump__%03d.png" % i))
+	for i in range(1, 13):
+		tex_jump_to_crouch_frames.append(load("res://assets/sprites/player/jump_to_crouch/jump_to_crouch___%03d.png" % i))
+	for i in range(3, 10):
+		tex_crouch_frames.append(load("res://assets/sprites/player/crouch/crouch___%03d.png" % i))
+	for i in range(3, 9):
+		tex_stand_frames.append(load("res://assets/sprites/player/stand/stand___%03d.png" % i))
+	for i in range(1, 27):
+		tex_crouch_walk_frames.append(load("res://assets/sprites/player/crouch_walk/crouch_walk___%03d.png" % i))
+	sprite.texture = tex_idle_frames[0]
+	if has_bengala:
+		_create_bengala()
 
 func _physics_process(delta: float) -> void:
 	_apply_gravity(delta)
 	_tick_timers(delta)
+
+	# Durante el empuje (hitstun) el input no responde: solo el knockback mueve al pj.
+	# Recien cuando termina el alejamiento vuelve el control normal.
+	if hitstun_timer > 0.0:
+		hitstun_timer -= delta
+		velocity.x    = knockback_vel
+		knockback_vel = move_toward(knockback_vel, 0.0, 520.0 * delta)
+		_update_collision()
+		_update_sprite()
+		move_and_slide()
+		return
+
 	match state:
-		State.IDLE, State.WALK:  _handle_ground(delta)
+		State.IDLE, State.WALK, State.RUN:  _handle_ground(delta)
+		State.STOP:              _handle_stop(delta)
+		State.RUN_JUMP:          _handle_run_jump(delta)
+		State.JUMP_SQUAT:        _handle_jump_squat(delta)
 		State.CROUCH:            _handle_crouch(delta)
+		State.CROUCH_WALK:       _handle_crouch_walk(delta)
+		State.STAND:             _handle_stand(delta)
 		State.ROLL:              _handle_roll(delta)
 		State.JUMP, State.FALL:  _handle_air(delta)
+		State.JUMP_TO_CROUCH:    _handle_jump_to_crouch(delta)
+		State.LAND:              _handle_land(delta)
 		State.ATTACKING:         _handle_attacking(delta)
 		State.AIR_ATTACKING:     _handle_air_attacking(delta)
+		State.AIR_KICKING:       _handle_air_kicking(delta)
 		State.CROUCH_ATTACKING:  _handle_crouch_attacking(delta)
 	_update_collision()
 	_update_sprite()
+	_separate_from_enemies(delta)
 	# Aplicar y decaer knockback del jugador
 	velocity.x += knockback_vel
 	knockback_vel = move_toward(knockback_vel, 0.0, 520.0 * delta)
+	_update_shake(delta)
 	move_and_slide()
 
 func _apply_gravity(delta: float) -> void:
@@ -77,20 +271,125 @@ func _apply_gravity(delta: float) -> void:
 		velocity.y += GRAVITY * delta
 
 func _tick_timers(delta: float) -> void:
-	if iframe_timer > 0.0: iframe_timer -= delta
+	if iframe_timer > 0.0:          iframe_timer          -= delta
+	if combo_cooldown_timer > 0.0: combo_cooldown_timer -= delta
+	if state == State.IDLE:
+		idle_frame_timer += delta
+		if idle_frame_timer >= 1.0 / IDLE_FPS:
+			idle_frame_timer -= 1.0 / IDLE_FPS
+			idle_frame_index = (idle_frame_index + 1) % tex_idle_frames.size()
+	if state == State.WALK:
+		walk_frame_timer += delta
+		if walk_frame_timer >= 1.0 / WALK_FPS:
+			walk_frame_timer -= 1.0 / WALK_FPS
+			walk_frame_index = (walk_frame_index + 1) % tex_walk_frames.size()
+	if state == State.RUN:
+		run_frame_timer += delta
+		if run_frame_timer >= 1.0 / RUN_FPS:
+			run_frame_timer -= 1.0 / RUN_FPS
+			run_frame_index = (run_frame_index + 1) % tex_run_frames.size()
+	if state == State.STOP:
+		var sfps := STOP_WALK_FPS if stop_from_walk else STOP_FPS
+		stop_frame_timer += delta
+		if stop_frame_timer >= 1.0 / sfps:
+			stop_frame_timer -= 1.0 / sfps
+			stop_frame_index = mini(stop_frame_index + 1, tex_stop_frames.size() - 1)
+	if state == State.RUN_JUMP:
+		run_jump_frame_timer += delta
+		if run_jump_frame_timer >= 1.0 / RUN_JUMP_FPS:
+			run_jump_frame_timer -= 1.0 / RUN_JUMP_FPS
+			run_jump_frame_index = mini(run_jump_frame_index + 1, tex_run_jump_frames.size() - 1)
+	if state == State.CROUCH:
+		if crouch_frame_index < tex_crouch_frames.size() - 1:
+			var cfps := CROUCH_FAST_FPS if crouch_fast else CROUCH_FPS
+			crouch_frame_timer += delta
+			if crouch_frame_timer >= 1.0 / cfps:
+				crouch_frame_timer -= 1.0 / cfps
+				crouch_frame_index = mini(crouch_frame_index + 1, tex_crouch_frames.size() - 1)
+	if state == State.CROUCH_WALK:
+		crouch_walk_frame_timer += delta
+		if crouch_walk_frame_timer >= 1.0 / CROUCH_WALK_FPS:
+			crouch_walk_frame_timer -= 1.0 / CROUCH_WALK_FPS
+			crouch_walk_frame_index = (crouch_walk_frame_index + 1) % tex_crouch_walk_frames.size()
+	if state == State.STAND:
+		var fps := STAND_FAST_FPS if stand_fast else STAND_FPS
+		stand_frame_timer += delta
+		if stand_frame_timer >= 1.0 / fps:
+			stand_frame_timer -= 1.0 / fps
+			stand_frame_index = mini(stand_frame_index + 1, tex_stand_frames.size() - 1)
+	if state in [State.JUMP_SQUAT, State.JUMP, State.FALL, State.LAND]:
+		var ducking_in_air := Input.is_action_pressed("ui_down") and state in [State.JUMP, State.FALL]
+		var freeze_at_peak := state in [State.JUMP, State.FALL] and (
+			(not jump_from_run and not ducking_in_air and jump_frame_index >= 20) or
+			(not jump_from_run and ducking_in_air and jump_frame_index >= 34) or
+			(jump_from_run and jump_frame_index >= 22)
+		)
+		if not freeze_at_peak:
+			jump_frame_timer += delta
+			if jump_frame_timer >= 1.0 / JUMP_FPS:
+				jump_frame_timer -= 1.0 / JUMP_FPS
+				jump_frame_index = mini(jump_frame_index + 1, tex_jump_frames.size() - 1)
+		if ducking_in_air and not jump_from_run and jump_frame_index >= 34:
+			jump_to_crouch_frame_index = 0
+			jump_to_crouch_frame_timer = 0.0
+			state = State.JUMP_TO_CROUCH
+	if state == State.JUMP_TO_CROUCH:
+		jump_to_crouch_frame_timer += delta
+		if jump_to_crouch_frame_timer >= 1.0 / JUMP_TO_CROUCH_FPS:
+			jump_to_crouch_frame_timer -= 1.0 / JUMP_TO_CROUCH_FPS
+			jump_to_crouch_frame_index = mini(jump_to_crouch_frame_index + 1, tex_jump_to_crouch_frames.size() - 1)
+	if state == State.ATTACKING and current_attack == AttackType.JAB:
+		jab_frame_timer += delta
+		if jab_frame_timer >= 1.0 / JAB_FPS:
+			jab_frame_timer -= 1.0 / JAB_FPS
+			jab_frame_index = mini(jab_frame_index + 1, tex_jab_frames.size() - 1)
+	if state == State.ATTACKING and current_attack == AttackType.HOOK:
+		hook_frame_timer += delta
+		if hook_frame_timer >= 1.0 / HOOK_FPS:
+			hook_frame_timer -= 1.0 / HOOK_FPS
+			hook_frame_index = mini(hook_frame_index + 1, tex_hook_frames.size() - 1)
+	if state == State.ATTACKING and current_attack == AttackType.UPPERCUT:
+		uppercut_frame_timer += delta
+		if uppercut_frame_timer >= 1.0 / UPPERCUT_FPS:
+			uppercut_frame_timer -= 1.0 / UPPERCUT_FPS
+			uppercut_frame_index = mini(uppercut_frame_index + 1, tex_uppercut_frames.size() - 1)
+	if state == State.ATTACKING and current_attack == AttackType.KICK:
+		kick_frame_timer += delta
+		if kick_frame_timer >= 1.0 / KICK_FPS:
+			kick_frame_timer -= 1.0 / KICK_FPS
+			kick_frame_index = mini(kick_frame_index + 1, tex_kick_frames.size() - 1)
+	if state == State.ATTACKING and current_attack == AttackType.FLYING_KICK:
+		flying_kick_frame_timer += delta
+		if flying_kick_frame_timer >= 1.0 / FLYING_KICK_FPS:
+			flying_kick_frame_timer -= 1.0 / FLYING_KICK_FPS
+			flying_kick_frame_index = mini(flying_kick_frame_index + 1, tex_flying_kick_frames.size() - 1)
+		if not flying_kick_hit_done and flying_kick_frame_index >= FLYING_KICK_IMPACT:
+			flying_kick_hit_done = true
+			_flying_kick_impact()
+	if state == State.ATTACKING and current_attack == AttackType.THROW:
+		throw_frame_timer += delta
+		if throw_frame_timer >= 1.0 / THROW_FPS:
+			throw_frame_timer -= 1.0 / THROW_FPS
+			throw_frame_index = mini(throw_frame_index + 1, tex_throw_frames.size() - 1)
+		# Soltar la lata cuando el brazo esta extendido
+		if not throw_can_spawned and throw_frame_index >= THROW_SPAWN_FRAME:
+			throw_can_spawned = true
+			_spawn_can()
 
 # ── Daño recibido ─────────────────────────────────────────────────────────────
 
-func take_damage(amount: int, from_right: bool) -> void:
+func take_damage(amount: int, from_right: bool, knockback: float = 200.0) -> void:
 	if iframe_timer > 0.0: return
-	hp           -= amount
+	hp            = hp - amount
 	iframe_timer  = IFRAME_DUR
-	knockback_vel = 200.0 * (1.0 if from_right else -1.0)
+	velocity.x    = 0.0
+	knockback_vel = knockback * (1.0 if from_right else -1.0)
+	# Bloquear input mientras dura el empuje (tiempo que tarda en frenar el knockback)
+	if knockback != 0.0:
+		hitstun_timer = absf(knockback) / 520.0
+	# Vida infinita por ahora: al llegar a 0 se recarga para seguir viendo la interfaz
 	if hp <= 0:
-		hp = 0
-		var hud := get_tree().get_first_node_in_group("hud")
-		if hud and hud.has_method("show_game_over"):
-			hud.call("show_game_over")
+		hp = MAX_HP
 
 # ── Golpear enemigos ──────────────────────────────────────────────────────────
 
@@ -104,59 +403,180 @@ func _try_hit_enemies(damage: int) -> void:
 			if e.has_method("take_damage"):
 				e.call("take_damage", damage, dx < 0.0)
 
+# Variante con knockback fuerte y alcance propio; devuelve true si conectó con algún enemigo.
+func _try_hit_enemies_kb(damage: int, knockback: float, range_x: float = HIT_RANGE_X) -> bool:
+	var hit := false
+	for enemy in get_tree().get_nodes_in_group("enemy"):
+		var e := enemy as Node2D
+		if not e: continue
+		var dx: float = e.global_position.x - global_position.x
+		var dy: float = abs(e.global_position.y - global_position.y)
+		if abs(dx) < range_x and dy < HIT_RANGE_Y and (dx > 0.0) == facing_right:
+			if e.has_method("take_damage"):
+				e.call("take_damage", damage, dx < 0.0, knockback)
+				hit = true
+	return hit
+
+# Golpe del finisher en el frame de impacto: daño + knockback, y si conecta,
+# hitstop (freeze) + screen shake para que se sienta el karatazo.
+func _flying_kick_impact() -> void:
+	if _try_hit_enemies_kb(2, FLYING_KICK_KB, FLYING_KICK_RANGE):
+		_do_hitstop(HITSTOP_DUR)
+		shake_amount = SHAKE_AMOUNT
+	_try_open_door()
+
+func _do_hitstop(dur: float) -> void:
+	if _hitstop_active: return
+	_hitstop_active = true
+	Engine.time_scale = 0.0
+	# Timer en tiempo real (ignore_time_scale=true) para que corra con el juego congelado.
+	await get_tree().create_timer(dur, true, false, true).timeout
+	Engine.time_scale = 1.0
+	_hitstop_active = false
+
+func _update_shake(delta: float) -> void:
+	if shake_amount > 0.4:
+		camera.offset = _cam_base_offset + Vector2(
+			randf_range(-shake_amount, shake_amount),
+			randf_range(-shake_amount, shake_amount))
+		shake_amount = move_toward(shake_amount, 0.0, SHAKE_DECAY * delta)
+	elif camera.offset != _cam_base_offset:
+		camera.offset = _cam_base_offset
+
+func _spawn_can() -> void:
+	var can := CAN_SCENE.instantiate() as Node2D
+	get_parent().add_child(can)
+	var dir := 1.0 if facing_right else -1.0
+	# Sale desde la mano extendida (adelante y a la altura del pecho)
+	can.global_position = global_position + Vector2(dir * 42.0, -34.0)
+	if can.has_method("init"):
+		can.call("init", dir)
+
+func _start_throw() -> void:
+	throw_frame_index = 0
+	throw_frame_timer = 0.0
+	throw_can_spawned = false
+	combo_step        = 0
+	current_attack    = AttackType.THROW
+	attack_timer      = float(THROW_FRAMES) / THROW_FPS
+	combo_timer       = 0.0
+	attack_queued     = false
+	state             = State.ATTACKING
+	velocity.x        = 0.0
+
 # ── Suelo ────────────────────────────────────────────────────────────────────
 
 func _handle_ground(delta: float) -> void:
 	if Input.is_action_pressed("ui_down"):
-		velocity.x = move_toward(velocity.x, 0.0, FRICTION * delta)
-
 		if Input.is_action_just_pressed("attack"):
+			velocity.x = move_toward(velocity.x, 0.0, FRICTION * delta)
 			_start_attack(AttackType.SWEEP, 0.30, 0.0)
 			_try_hit_enemies(1)
 			return
 
-		if Input.is_action_just_pressed("ui_down"):
-			var dir := Input.get_axis("ui_left", "ui_right")
-			if dir != 0.0:
-				_start_roll(dir)
-				return
-
-		state = State.CROUCH
+		var dir := Input.get_axis("ui_left", "ui_right")
+		if dir != 0.0 and state == State.RUN:
+			facing_right       = dir > 0.0
+			sprite.flip_h      = not facing_right
+			crouch_frame_index = 2
+			crouch_frame_timer = 0.0
+			crouch_fast        = true
+			state              = State.CROUCH
+		elif dir != 0.0:
+			facing_right            = dir > 0.0
+			sprite.flip_h           = not facing_right
+			crouch_walk_frame_index = 0
+			crouch_walk_frame_timer = 0.0
+			state                   = State.CROUCH_WALK
+		else:
+			velocity.x = move_toward(velocity.x, 0.0, FRICTION * delta)
+			if state != State.CROUCH:
+				crouch_frame_index = 0
+				crouch_frame_timer = 0.0
+				crouch_fast        = false
+			state = State.CROUCH
 		return
 
-	if Input.is_action_just_pressed("ui_accept"):
-		velocity.y = JUMP_FORCE
-		state = State.JUMP
+	if Input.is_action_just_pressed("throw"):
+		_start_throw()
 		return
 
-	if Input.is_action_just_pressed("attack"):
+	if Input.is_action_just_pressed("ui_up"):
+		# Idle salta igual que walk: instantaneo, sin jump_squat
+		jump_frame_index = 3
+		jump_frame_timer = 0.0
+		jump_from_run    = true
+		jump_from_walk   = state != State.RUN   # WALK e IDLE = salto tipo walk; RUN = corrida
+		jump_from_idle   = state == State.IDLE  # idle: más control de aire al presionar dirección
+		velocity.y       = RUN_JUMP_FORCE
+		state            = State.JUMP
+		return
+
+	if combo_cooldown_timer <= 0.0 and Input.is_action_just_pressed("attack"):
 		combo_step = 0
 		_launch_combo()
 		return
 
-	if Input.is_action_just_pressed("kick"):
+	if combo_cooldown_timer <= 0.0 and Input.is_action_just_pressed("kick"):
+		kick_frame_index = 0
+		kick_frame_timer = 0.0
 		_start_attack(AttackType.KICK, 0.35, 0.0)
 		_try_hit_enemies(1)
 		return
 
+	# PRUEBA: tecla D lanza la patada voladora (finisher candidato)
+	if combo_cooldown_timer <= 0.0 and Input.is_action_just_pressed("fly_kick"):
+		flying_kick_frame_index = 0
+		flying_kick_frame_timer = 0.0
+		flying_kick_hit_done = false
+		_start_attack(AttackType.FLYING_KICK, float(FLYING_KICK_FRAMES) / FLYING_KICK_FPS, 0.0)
+		return
+
 	var dir := Input.get_axis("ui_left", "ui_right")
+	var walking := Input.is_key_pressed(KEY_SHIFT) and dir != 0.0
 	if dir != 0.0:
-		facing_right = dir > 0.0
+		if (dir > 0.0 and velocity.x < 0.0) or (dir < 0.0 and velocity.x > 0.0):
+			velocity.x = 0.0
+		facing_right  = dir > 0.0
 		sprite.flip_h = not facing_right
-		velocity.x = move_toward(velocity.x, dir * MAX_SPEED, ACCELERATION * delta)
-		state = State.WALK
+		if walking:
+			if state != State.WALK:
+				walk_frame_index = 0
+				walk_frame_timer = 0.0
+			velocity.x = move_toward(velocity.x, dir * (MAX_SPEED * 0.3), ACCELERATION * delta)
+			state = State.WALK
+		else:
+			if state == State.IDLE or state == State.WALK:
+				run_frame_index = 0
+				run_frame_timer = 0.0
+			velocity.x = move_toward(velocity.x, dir * MAX_SPEED, ACCELERATION * delta)
+			state = State.RUN
 	else:
-		velocity.x = move_toward(velocity.x, 0.0, FRICTION * delta)
-		state = State.IDLE
+		velocity.x = move_toward(velocity.x, 0.0, 1800.0 * delta)
+		if state == State.RUN:
+			stop_frame_index = 0
+			stop_frame_timer = 0.0
+			stop_from_walk   = false
+			state = State.STOP
+		elif state == State.WALK:
+			stop_frame_index = 3
+			stop_frame_timer = 0.0
+			stop_from_walk   = true
+			state = State.STOP
+		elif state != State.STOP:
+			if state != State.IDLE:
+				idle_frame_index = 0
+				idle_frame_timer = 0.0
+			state = State.IDLE
 
 # ── Agachado ─────────────────────────────────────────────────────────────────
 
 func _handle_crouch(delta: float) -> void:
-	velocity.x = move_toward(velocity.x, 0.0, FRICTION * delta)
-
 	if not Input.is_action_pressed("ui_down"):
-		state = State.IDLE
+		stand_frame_index = 0
+		stand_frame_timer = 0.0
 		crouch_roll_cooldown = 0.0
+		state = State.STAND
 		return
 
 	if Input.is_action_just_pressed("kick"):
@@ -165,13 +585,219 @@ func _handle_crouch(delta: float) -> void:
 		_try_hit_enemies(1)
 		return
 
-	if crouch_roll_cooldown > 0.0:
-		crouch_roll_cooldown -= delta
-		return
+	var dir := Input.get_axis("ui_left", "ui_right")
+	if crouch_fast and crouch_frame_index >= tex_crouch_frames.size() - 1 and dir != 0.0:
+		crouch_fast             = false
+		facing_right            = dir > 0.0
+		sprite.flip_h           = not facing_right
+		crouch_walk_frame_index = 0
+		crouch_walk_frame_timer = 0.0
+		state                   = State.CROUCH_WALK
+	elif crouch_fast and dir != 0.0:
+		facing_right  = dir > 0.0
+		sprite.flip_h = not facing_right
+		velocity.x    = dir * (MAX_SPEED * 0.5)
+	elif dir != 0.0 and not crouch_fast:
+		facing_right             = dir > 0.0
+		sprite.flip_h            = not facing_right
+		crouch_walk_frame_index  = 0
+		crouch_walk_frame_timer  = 0.0
+		state                    = State.CROUCH_WALK
+	else:
+		velocity.x = 0.0 if crouch_fast else move_toward(velocity.x, 0.0, FRICTION * delta)
 
+
+func _handle_crouch_walk(delta: float) -> void:
+	if not Input.is_action_pressed("ui_down"):
+		stand_frame_index = 0
+		stand_frame_timer = 0.0
+		var dir := Input.get_axis("ui_left", "ui_right")
+		stand_fast = dir != 0.0
+		state = State.STAND
+		return
 	var dir := Input.get_axis("ui_left", "ui_right")
 	if dir != 0.0:
-		_start_roll(dir)
+		facing_right  = dir > 0.0
+		sprite.flip_h = not facing_right
+		velocity.x    = dir * (MAX_SPEED * 0.3)
+	else:
+		velocity.x         = 0.0
+		crouch_frame_index = tex_crouch_frames.size() - 1
+		state              = State.CROUCH
+
+func _handle_jump_to_crouch(_delta: float) -> void:
+	var dir := Input.get_axis("ui_left", "ui_right")
+	if dir != 0.0:
+		facing_right  = dir > 0.0
+		sprite.flip_h = not facing_right
+		velocity.x    = dir * (MAX_SPEED * 0.5)
+	else:
+		velocity.x = 0.0
+	if is_on_floor() or jump_to_crouch_frame_index >= tex_jump_to_crouch_frames.size() - 1:
+		crouch_fast = false
+		if dir != 0.0:
+			crouch_walk_frame_index = 0
+			crouch_walk_frame_timer = 0.0
+			state                   = State.CROUCH_WALK
+		else:
+			velocity.x         = 0.0
+			crouch_frame_index = tex_crouch_frames.size() - 1
+			crouch_frame_timer = 0.0
+			state              = State.CROUCH
+
+func _handle_stand(delta: float) -> void:
+	if Input.is_action_just_pressed("attack"):
+		combo_step = 0
+		_launch_combo()
+		return
+	if Input.is_action_just_pressed("kick"):
+		kick_frame_index = 0
+		kick_frame_timer = 0.0
+		_start_attack(AttackType.KICK, 0.35, 0.0)
+		_try_hit_enemies(1)
+		return
+	var dir := Input.get_axis("ui_left", "ui_right")
+	if stand_fast and dir != 0.0:
+		facing_right  = dir > 0.0
+		sprite.flip_h = not facing_right
+		velocity.x    = dir * MAX_SPEED
+	else:
+		velocity.x = 0.0
+	if stand_frame_index >= tex_stand_frames.size() - 1:
+		if stand_fast and dir != 0.0:
+			stand_fast      = false
+			run_frame_index = 0
+			run_frame_timer = 0.0
+			state           = State.RUN
+		else:
+			stand_fast       = false
+			idle_frame_index = 0
+			idle_frame_timer = 0.0
+			state            = State.IDLE
+
+func _handle_run_jump(delta: float) -> void:
+	velocity.x = move_toward(velocity.x, 0.0, FRICTION * delta)
+	if run_jump_frame_index >= tex_run_jump_frames.size() - 1:
+		run_jump_hold_timer += delta
+		if run_jump_hold_timer >= RUN_JUMP_HOLD_DUR:
+			jump_frame_index    = 0
+			jump_frame_timer    = 0.0
+			run_jump_hold_timer = 0.0
+			velocity.y          = JUMP_FORCE
+			state               = State.JUMP
+
+func _handle_stop(delta: float) -> void:
+	if Input.is_action_just_pressed("throw"):
+		_start_throw()
+		return
+	if Input.is_action_just_pressed("attack"):
+		combo_step = 0
+		_launch_combo()
+		return
+	if Input.is_action_just_pressed("kick"):
+		kick_frame_index = 0
+		kick_frame_timer = 0.0
+		_start_attack(AttackType.KICK, 0.35, 0.0)
+		_try_hit_enemies(1)
+		return
+	if Input.is_action_pressed("ui_down"):
+		crouch_frame_index = 0
+		crouch_frame_timer = 0.0
+		crouch_fast        = false
+		velocity.x         = 0.0
+		state              = State.CROUCH
+		return
+	var dir := Input.get_axis("ui_left", "ui_right")
+	if dir != 0.0:
+		facing_right  = dir > 0.0
+		sprite.flip_h = not facing_right
+		if stop_from_walk and Input.is_key_pressed(KEY_SHIFT):
+			stop_from_walk   = false
+			walk_frame_index = 0
+			walk_frame_timer = 0.0
+			state = State.WALK
+		else:
+			stop_from_walk  = false
+			run_frame_index = 0
+			run_frame_timer = 0.0
+			state = State.RUN
+		return
+	if Input.is_action_just_pressed("ui_up"):
+		# STOP salta corto como walk/idle (poca distancia horizontal)
+		jump_frame_index = 3
+		jump_frame_timer = 0.0
+		jump_from_run    = true
+		jump_from_walk   = true
+		jump_from_idle   = false
+		velocity.y       = RUN_JUMP_FORCE
+		state            = State.JUMP
+		return
+	velocity.x = move_toward(velocity.x, 0.0, FRICTION * 6.0 * delta)
+	if stop_frame_index >= tex_stop_frames.size() - 1:
+		idle_frame_index = 0
+		idle_frame_timer = 0.0
+		state = State.IDLE
+
+
+func _handle_jump_squat(delta: float) -> void:
+	if not jump_from_run:
+		velocity.x = move_toward(velocity.x, 0.0, FRICTION * delta)
+	jump_squat_timer -= delta
+	if jump_squat_timer <= 0.0:
+		velocity.y = JUMP_FORCE
+		state      = State.JUMP
+
+func _handle_land(delta: float) -> void:
+	if Input.is_action_pressed("ui_down"):
+		var land_dir := Input.get_axis("ui_left", "ui_right")
+		if land_dir != 0.0:
+			facing_right       = land_dir > 0.0
+			sprite.flip_h      = not facing_right
+			velocity.x         = land_dir * (MAX_SPEED * 0.5)
+			crouch_frame_index = 4
+			crouch_frame_timer = 0.0
+			crouch_fast        = true
+		else:
+			velocity.x         = 0.0
+			crouch_frame_index = 4
+			crouch_frame_timer = 0.0
+			crouch_fast        = true
+		state = State.CROUCH
+		return
+	var dir := Input.get_axis("ui_left", "ui_right")
+	if dir != 0.0:
+		facing_right    = dir > 0.0
+		sprite.flip_h   = not facing_right
+		velocity.x      = dir * MAX_SPEED
+		run_frame_index = 0
+		run_frame_timer = 0.0
+		jump_frame_index = 0
+		state = State.RUN
+		return
+	velocity.x = 0.0
+	if Input.is_action_just_pressed("ui_up"):
+		# Salto parado tras aterrizar: corto como walk/idle
+		jump_frame_index = 0
+		jump_frame_timer = 0.0
+		jump_from_run    = false
+		jump_from_walk   = true
+		jump_from_idle   = true
+		jump_squat_timer = JUMP_SQUAT_DUR
+		velocity.x       = 0.0
+		state            = State.JUMP_SQUAT
+		return
+	var land_max := tex_run_jump_frames.size() - 1 if jump_from_run else tex_jump_frames.size() - 1
+	if jump_frame_index >= land_max:
+		jump_frame_index = 0
+		if jump_from_run:
+			velocity.x      = (1.0 if facing_right else -1.0) * MAX_SPEED
+			run_frame_index = 0
+			run_frame_timer = 0.0
+			state           = State.RUN
+		else:
+			idle_frame_index = 0
+			idle_frame_timer = 0.0
+			state = State.IDLE
 
 func _start_roll(dir: float) -> void:
 	roll_dir       = dir
@@ -187,24 +813,40 @@ func _handle_roll(delta: float) -> void:
 		velocity.x           = 0.0
 		roll_remaining       = 0.0
 		crouch_roll_cooldown = ROLL_PAUSE
+		crouch_frame_index   = tex_crouch_frames.size() - 1
 		state                = State.CROUCH
 
 # ── Aire ─────────────────────────────────────────────────────────────────────
 
 func _handle_air(delta: float) -> void:
+	if jump_frame_index < 8 and not jump_from_run:
+		velocity.x = 0.0
+		return
 	var dir := Input.get_axis("ui_left", "ui_right")
+	var air_max: float
+	if jump_from_idle:
+		air_max = IDLE_JUMP_AIR_SPEED
+	elif jump_from_walk:
+		air_max = MAX_SPEED * 0.5
+	else:
+		air_max = RUN_JUMP_SPEED
 	if dir != 0.0:
-		facing_right  = dir > 0.0
-		sprite.flip_h = not facing_right
-		velocity.x = move_toward(velocity.x, dir * MAX_SPEED, ACCELERATION * delta * 0.6)
+		if (dir > 0.0) == facing_right:
+			# Hacia adelante (la dirección del salto): acelera. No gira el sprite en el aire;
+			# la imagen se da vuelta recién al cambiar de animación (al aterrizar a idle/run).
+			velocity.x = dir * air_max
+		else:
+			# Dirección inversa: frena drásticamente hacia 0, sin desplazarse para atrás.
+			velocity.x = move_toward(velocity.x, 0.0, AIR_BRAKE * delta)
 	else:
 		velocity.x = move_toward(velocity.x, 0.0, FRICTION * delta * 0.3)
 
 	if Input.is_action_just_pressed("attack"):
-		current_attack = AttackType.AIR_PUNCH
-		attack_timer   = 0.28
-		state          = State.AIR_ATTACKING
-		_try_hit_enemies(1)
+		air_kick_frame_index = 0
+		air_kick_frame_timer = 0.0
+		air_kick_connected   = false
+		air_kick_speed       = maxf(AIR_KICK_FORWARD, absf(velocity.x))  # hereda el envión de entrada
+		state                = State.AIR_KICKING
 		return
 
 	if Input.is_action_just_pressed("kick") and Input.is_action_pressed("ui_down"):
@@ -216,7 +858,39 @@ func _handle_air(delta: float) -> void:
 		return
 
 	if is_on_floor():
-		state = State.IDLE
+		if Input.is_action_pressed("ui_down"):
+			var land_dir := Input.get_axis("ui_left", "ui_right")
+			if land_dir != 0.0:
+				facing_right       = land_dir > 0.0
+				sprite.flip_h      = not facing_right
+				velocity.x         = land_dir * (MAX_SPEED * 0.5)
+				crouch_frame_index = 4
+				crouch_frame_timer = 0.0
+				crouch_fast        = true
+				state              = State.CROUCH
+			else:
+				velocity.x         = 0.0
+				crouch_frame_index = 4
+				crouch_frame_timer = 0.0
+				crouch_fast        = true
+				state              = State.CROUCH
+		elif jump_from_run:
+			jump_frame_index = 23
+			jump_frame_timer = 0.0
+			state            = State.LAND
+		else:
+			var land_dir := Input.get_axis("ui_left", "ui_right")
+			if land_dir != 0.0:
+				facing_right    = land_dir > 0.0
+				sprite.flip_h   = not facing_right
+				velocity.x      = land_dir * MAX_SPEED
+				run_frame_index = 0
+				run_frame_timer = 0.0
+				state           = State.RUN
+			else:
+				jump_frame_index = 33
+				jump_frame_timer = 0.0
+				state = State.LAND
 	elif velocity.y > 0.0:
 		state = State.FALL
 
@@ -225,11 +899,21 @@ func _handle_air(delta: float) -> void:
 func _launch_combo() -> void:
 	var dmg := 1
 	match combo_step:
-		0: _start_attack(AttackType.JAB,      0.18, COMBO_WINDOW)
-		1: _start_attack(AttackType.HOOK,     0.22, COMBO_WINDOW)
+		0:
+			jab_frame_index = 0
+			jab_frame_timer = 0.0
+			_start_attack(AttackType.JAB,      COMBO_HIT_DUR, COMBO_WINDOW)
+		1:
+			hook_frame_index = 0
+			hook_frame_timer = 0.0
+			_start_attack(AttackType.HOOK,     COMBO_HIT_DUR, COMBO_WINDOW)
 		2:
-			_start_attack(AttackType.UPPERCUT, 0.38, 0.0)
-			dmg = 2
+			flying_kick_frame_index = 0
+			flying_kick_frame_timer = 0.0
+			flying_kick_hit_done = false
+			_start_attack(AttackType.FLYING_KICK, float(FLYING_KICK_FRAMES) / FLYING_KICK_FPS, 0.0)
+			_try_open_door()
+			return  # el golpe se registra en el frame de impacto (con hitstop + shake)
 	_try_hit_enemies(dmg)
 	_try_open_door()
 
@@ -251,13 +935,26 @@ func _handle_attacking(delta: float) -> void:
 	combo_timer   = max(combo_timer - delta, 0.0)
 
 	if attack_timer <= 0.0:
-		if attack_queued and combo_timer > 0.0:
+		if attack_queued:
 			combo_step   += 1
 			attack_queued = false
 			_launch_combo()
 		elif combo_timer <= 0.0:
+			if combo_step == 2:
+				combo_cooldown_timer = COMBO_COOLDOWN
 			combo_step = 0
-			state = State.IDLE if is_on_floor() else State.FALL
+			var dir := Input.get_axis("ui_left", "ui_right")
+			if is_on_floor() and dir != 0.0:
+				facing_right  = dir > 0.0
+				sprite.flip_h = not facing_right
+				run_frame_index = 0
+				run_frame_timer = 0.0
+				velocity.x = dir * MAX_SPEED
+				state = State.RUN
+			else:
+				idle_frame_index = 0
+				idle_frame_timer = 0.0
+				state = State.IDLE if is_on_floor() else State.FALL
 
 func _handle_air_attacking(delta: float) -> void:
 	var dir := Input.get_axis("ui_left", "ui_right")
@@ -266,7 +963,73 @@ func _handle_air_attacking(delta: float) -> void:
 
 	attack_timer -= delta
 	if attack_timer <= 0.0:
+		idle_frame_index = 0
+		idle_frame_timer = 0.0
 		state = State.IDLE if is_on_floor() else (State.FALL if velocity.y > 0.0 else State.JUMP)
+
+# Patada aérea: se dispara en el aire y la animación maneja todo el movimiento
+# (patada en el aire → caída → aterrizaje → idle). La gravedad la baja al piso;
+# mientras esté en el aire la animación se congela en AIR_KICK_HOLD, y al tocar
+# el suelo sigue con el aterrizaje hasta idle.
+func _handle_air_kicking(delta: float) -> void:
+	var grounded := is_on_floor()
+
+	if grounded:
+		# Al tocar el piso deja de desplazarse en el acto; el input puede arrancar crouch/run.
+		if Input.is_action_pressed("ui_down"):
+			crouch_frame_index = 0
+			crouch_frame_timer = 0.0
+			crouch_fast        = false
+			state = State.CROUCH
+			return
+		var idir := Input.get_axis("ui_left", "ui_right")
+		if idir != 0.0:
+			facing_right    = idir > 0.0
+			sprite.flip_h   = not facing_right
+			run_frame_index = 0
+			run_frame_timer = 0.0
+			velocity.x      = idir * MAX_SPEED
+			state = State.RUN
+			return
+		velocity.x = 0.0   # aterrizó sin input: frena ya y hace el recovery en el lugar → idle
+	else:
+		# En el aire: dive con control. Manteniendo adelante = todo el envión heredado;
+		# soltando adelante = mitad de velocidad (para acortar el alcance).
+		var input_dir := Input.get_axis("ui_left", "ui_right")
+		var holding_fwd := input_dir != 0.0 and (input_dir > 0.0) == facing_right
+		var dive_speed: float = air_kick_speed if holding_fwd else air_kick_speed * 0.5
+		velocity.x = (1.0 if facing_right else -1.0) * dive_speed
+
+	# Golpe: al llegar a la pierna extendida sigue chequeando enemigos hasta conectar.
+	if not air_kick_connected and air_kick_frame_index >= AIR_KICK_IMPACT:
+		if _try_hit_enemies_kb(2, AIR_KICK_KB, FLYING_KICK_RANGE):
+			air_kick_connected = true
+			_do_hitstop(HITSTOP_DUR)
+			shake_amount = SHAKE_AMOUNT
+
+	# Avanzar frames: velocidad normal hasta el freeze, más rápido en el recovery.
+	var fps: float = AIR_KICK_FPS if air_kick_frame_index < AIR_KICK_HOLD else AIR_KICK_RECOVER_FPS
+	air_kick_frame_timer += delta
+	var step := air_kick_frame_timer >= 1.0 / fps
+	if step:
+		air_kick_frame_timer -= 1.0 / fps
+
+	var last := tex_air_kick_frames.size() - 1
+	var near_ground := grounded or test_move(global_transform, Vector2(0.0, AIR_KICK_NEAR_GROUND))
+
+	# Freno en la patada extendida hasta pegar o acercarse al piso.
+	var cap := last
+	if not (air_kick_connected or near_ground):
+		cap = AIR_KICK_HOLD
+	if step:
+		air_kick_frame_index = mini(air_kick_frame_index + 1, cap)
+
+	# Terminó la secuencia en el piso → idle (acá termina el desplazamiento).
+	if grounded and air_kick_frame_index >= last:
+		velocity.x = 0.0
+		idle_frame_index = 0
+		idle_frame_timer = 0.0
+		state = State.IDLE
 
 func _handle_crouch_attacking(delta: float) -> void:
 	velocity.x   = move_toward(velocity.x, 0.0, FRICTION * delta)
@@ -278,7 +1041,7 @@ func _handle_crouch_attacking(delta: float) -> void:
 
 func _update_collision() -> void:
 	var cap := collision.shape as CapsuleShape2D
-	if state in [State.CROUCH, State.ROLL, State.CROUCH_ATTACKING]:
+	if state in [State.CROUCH, State.CROUCH_WALK, State.ROLL, State.CROUCH_ATTACKING]:
 		cap.height           = 38.0
 		collision.position.y = 15.0
 	else:
@@ -288,22 +1051,109 @@ func _update_collision() -> void:
 func _update_sprite() -> void:
 	match state:
 		State.IDLE:
-			sprite.texture = tex_idle
+			if tex_idle_frames.size() > 0:
+				sprite.texture = tex_idle_frames[idle_frame_index]
 		State.WALK:
-			sprite.texture = tex_walk
-		State.JUMP, State.FALL:
-			sprite.texture = tex_jump
-		State.CROUCH, State.ROLL:
-			sprite.texture = tex_crouch
+			if tex_walk_frames.size() > 0:
+				sprite.texture = tex_walk_frames[walk_frame_index]
+		State.RUN:
+			if tex_run_frames.size() > 0:
+				sprite.texture = tex_run_frames[run_frame_index]
+		State.STOP:
+			if tex_stop_frames.size() > 0:
+				sprite.texture = tex_stop_frames[stop_frame_index]
+		State.RUN_JUMP:
+			if tex_run_jump_frames.size() > 0:
+				sprite.texture = tex_run_jump_frames[run_jump_frame_index]
+		State.JUMP_TO_CROUCH:
+			if tex_jump_to_crouch_frames.size() > 0:
+				sprite.texture = tex_jump_to_crouch_frames[jump_to_crouch_frame_index]
+		State.JUMP_SQUAT, State.JUMP, State.FALL, State.LAND:
+			if jump_from_run and tex_run_jump_frames.size() > 0:
+				sprite.texture = tex_run_jump_frames[mini(jump_frame_index, tex_run_jump_frames.size() - 1)]
+			elif tex_jump_frames.size() > 0:
+				sprite.texture = tex_jump_frames[jump_frame_index]
+		State.CROUCH:
+			if tex_crouch_frames.size() > 0:
+				sprite.texture = tex_crouch_frames[crouch_frame_index]
+		State.CROUCH_WALK:
+			if tex_crouch_walk_frames.size() > 0:
+				sprite.texture = tex_crouch_walk_frames[crouch_walk_frame_index]
+		State.STAND:
+			if tex_stand_frames.size() > 0:
+				sprite.texture = tex_stand_frames[stand_frame_index]
+		State.ROLL, State.CROUCH_ATTACKING:
+			if tex_crouch_frames.size() > 0:
+				sprite.texture = tex_crouch_frames[tex_crouch_frames.size() - 1]
+		State.AIR_KICKING:
+			if tex_air_kick_frames.size() > 0:
+				sprite.texture = tex_air_kick_frames[air_kick_frame_index]
 		State.ATTACKING, State.AIR_ATTACKING:
-			sprite.texture = tex_attack
-		State.CROUCH_ATTACKING:
-			sprite.texture = tex_crouch
+			match current_attack:
+				AttackType.JAB:
+					if tex_jab_frames.size() > 0:
+						sprite.texture = tex_jab_frames[jab_frame_index]
+				AttackType.HOOK:
+					if tex_hook_frames.size() > 0:
+						sprite.texture = tex_hook_frames[hook_frame_index]
+				AttackType.UPPERCUT:
+					if tex_uppercut_frames.size() > 0:
+						sprite.texture = tex_uppercut_frames[uppercut_frame_index]
+				AttackType.KICK:
+					if tex_kick_frames.size() > 0:
+						sprite.texture = tex_kick_frames[kick_frame_index]
+				AttackType.FLYING_KICK:
+					if tex_flying_kick_frames.size() > 0:
+						sprite.texture = tex_flying_kick_frames[flying_kick_frame_index]
+				AttackType.THROW:
+					if tex_throw_frames.size() > 0:
+						sprite.texture = tex_throw_frames[throw_frame_index]
+				_:
+					sprite.texture = tex_attack
 
 	# Parpadeo durante invulnerabilidad
 	sprite.modulate.a = 0.35 if (iframe_timer > 0.0 and int(iframe_timer * 10) % 2 == 0) else 1.0
 
+# ── Bengala de luz ───────────────────────────────────────────────────────────
+
+func _create_bengala() -> void:
+	_bengala = Node2D.new()
+	_bengala.position = Vector2(0, -40)
+	_bengala.z_index = -1
+	add_child(_bengala)
+
+	var light := PointLight2D.new()
+	light.color = Color(0.1, 1.0, 0.2)
+	light.energy = 1.5
+	light.texture = _radial_texture(256, Color(1.0, 1.0, 1.0))
+	light.texture_scale = 5.0
+	_bengala.add_child(light)
+
+func _radial_texture(size: int, color: Color) -> ImageTexture:
+	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	var c := size * 0.5
+	for x in range(size):
+		for y in range(size):
+			var d := Vector2(x, y).distance_to(Vector2(c, c)) / c
+			img.set_pixel(x, y, Color(color.r, color.g, color.b, maxf(0.0, 1.0 - d)))
+	return ImageTexture.create_from_image(img)
+
 # ── Detección de puertas ──────────────────────────────────────────────────────
+
+func _separate_from_enemies(_delta: float) -> void:
+	if not is_on_floor(): return
+	const MIN_SEP := 88.0
+	for enemy in get_tree().get_nodes_in_group("enemy"):
+		var e := enemy as Node2D
+		if not e: continue
+		var col := e.get_node_or_null("CollisionShape2D") as CollisionShape2D
+		if col and col.disabled: continue
+		var dx: float = global_position.x - e.global_position.x
+		var overlap: float = MIN_SEP - abs(dx)
+		if overlap > 0.0:
+			var push: float = sign(dx) if abs(dx) > 0.5 else 1.0
+			global_position.x += push * overlap * 0.75
+			velocity.x         = push * absf(velocity.x + 20.0)
 
 func _try_open_door() -> void:
 	for door in get_tree().get_nodes_in_group("door"):
