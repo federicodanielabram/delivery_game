@@ -105,6 +105,12 @@ async function main() {
   const saturationIdx = process.argv.indexOf('--saturation');
   const saturation = saturationIdx !== -1 ? parseFloat(process.argv[saturationIdx + 1]) : null;
 
+  // --kill-bright <0..1>: elimina píxeles muy brillantes (efectos de impacto blancos,
+  // destellos) antes de detectar el bbox. El personaje es rojo/negro (luma baja) así que
+  // no lo toca. Ej: 0.72 saca el swirl blanco del puñetazo.
+  const killBrightIdx = process.argv.indexOf('--kill-bright');
+  const killBright = killBrightIdx !== -1 ? parseFloat(process.argv[killBrightIdx + 1]) : null;
+
   const tempDir = path.join(os.tmpdir(), 'anim_' + Date.now());
   fs.mkdirSync(tempDir, { recursive: true });
 
@@ -119,6 +125,11 @@ async function main() {
     vfFilters.push(`eq=brightness=${br}:saturation=${sat}`);
   }
   vfFilters.push(`colorkey=0x00FF00:0.3:0.1`);
+  if (killBright !== null) {
+    // tolerancia ancha para keyear toda la banda brillante (difuso + núcleo blanco sólido)
+    vfFilters.push(`lumakey=threshold=${killBright}:tolerance=0.35`);
+    console.log(`Kill-bright: lumakey threshold=${killBright} tol=0.35 (elimina destellos/efectos blancos)`);
+  }
   execSync(
     `ffmpeg -y -i "${videoPath}" -vf "${vfFilters.join(',')}" -pix_fmt rgba "${path.join(tempDir, 'frame_%04d.png')}"`,
     { stdio: 'inherit' }

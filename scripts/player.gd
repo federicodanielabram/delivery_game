@@ -50,7 +50,7 @@ const IFRAME_DUR    := 1.0    # segundos de invulnerabilidad tras recibir golpe
 const HIT_RANGE_X   := 112.0  # alcance horizontal del golpe
 const HIT_RANGE_Y   := 52.0   # tolerancia vertical
 
-enum State      { IDLE, WALK, RUN, STOP, RUN_JUMP, JUMP_SQUAT, JUMP, FALL, LAND, JUMP_TO_CROUCH, CROUCH, CROUCH_WALK, STAND, ROLL, ATTACKING, AIR_ATTACKING, CROUCH_ATTACKING, AIR_KICKING }
+enum State      { IDLE, WALK, RUN, STOP, RUN_JUMP, JUMP_SQUAT, JUMP, FALL, LAND, JUMP_TO_CROUCH, CROUCH, CROUCH_WALK, STAND, ROLL, ATTACKING, AIR_ATTACKING, CROUCH_ATTACKING, AIR_KICKING, SLIDE, RUN_PUNCH }
 enum AttackType { JAB, HOOK, UPPERCUT, SWEEP, KICK, CROUCH_KICK, AIR_PUNCH, AIR_DOWN_KICK, THROW, FLYING_KICK }
 
 var state          := State.IDLE
@@ -158,7 +158,7 @@ const WALK_FPS := 50.0
 var tex_run_frames: Array[Texture2D] = []
 var run_frame_index  := 0
 var run_frame_timer  := 0.0
-const RUN_FPS := 30.0
+const RUN_FPS := 60.0
 
 var tex_stop_frames: Array[Texture2D] = []
 var stop_frame_index := 0
@@ -182,6 +182,51 @@ var jump_from_run    := false
 var jump_from_walk   := false
 var jump_from_idle   := false
 const JUMP_FPS := 24.0
+
+# ── Slide (pop-up slide de béisbol) ──────────────────────────────────────────
+# Se dispara desde RUN + agacharse + dirección. El pj se tira, se desliza con
+# los pies adelante barriendo enemigos (los atraviesa, hitbox baja) y se levanta
+# de nuevo a RUN. Índices 0-based sobre los 97 frames de slide/:
+#   0-16 corre · 17-20 se tira · 21-49 barrida feet-first · 50-63 se levanta · 64+ corre
+const SLIDE_FPS         := 72.0  # rápido para entrar al frame de congelado
+const SLIDE_EXIT_FPS    := 120.0 # salida del congelado a la levantada/run (ahora el FPS sí manda)
+const SLIDE_START_FRAME := 17    # arranca el clavado
+const SLIDE_HOLD_FRAME  := 29    # slide_030: se congela acá deslizándose por el piso
+const SLIDE_HOLD_DUR    := 0.65  # cuánto se queda agachado deslizándose (subir = más largo)
+const SLIDE_HIT_END     := 49    # último frame que barre (fin del deslizamiento)
+const SLIDE_END_FRAME   := 73    # slide_074: último frame que se reproduce (75+ deshabilitados) → empalma con RUN
+const SLIDE_CROUCHWALK_FRAME := 60 # slide_061: si encadenás a caminar agachado, corta acá sin terminar de pararse
+const SLIDE_HIT_KB      := 0.0   # 0 = enemigo plantado (consistente con el combo)
+const SLIDE_RANGE       := 96.0  # alcance de la barrida
+var tex_slide_frames: Array[Texture2D] = []
+var slide_frame_index := 0
+var slide_frame_timer := 0.0
+var slide_hold_timer  := 0.0
+var slide_dir         := 1.0
+var slide_hit_ids: Dictionary = {}
+
+# ── Puñetazo corriendo (run punch) ───────────────────────────────────────────
+# Se dispara desde RUN + atacar (Z). Lunge hacia adelante con un recto; el video
+# tiene un hold natural largo (~frames 35-61) que NO cargamos: dejamos uno y lo
+# congelamos por código con RUN_PUNCH_HOLD_DUR. Índices 0-based sobre run_punch/ (97):
+#   0-17 corre · 18-33 windup+lanza · 34-40 puño extendido (impacto) · 41-80 retrae · 81+ corre
+const RUN_PUNCH_FPS         := 90.0   # entrada al golpe (windup + lanzar brazo)
+const RUN_PUNCH_EXIT_FPS    := 120.0  # salida (retrae) → run
+const RUN_PUNCH_START_FRAME := 18     # frame19: arranca el windup
+const RUN_PUNCH_HOLD_FRAME  := 39     # frame40: puño extendido, se congela acá
+const RUN_PUNCH_HOLD_DUR    := 0.10   # cuánto dura el golpe congelado (subir = más pesado)
+const RUN_PUNCH_END_FRAME   := 80     # frame81: retraído → vuelve a run/idle
+const RUN_PUNCH_IMPACT      := 33     # frame donde conecta el golpe (registra daño)
+const RUN_PUNCH_DMG         := 2
+const RUN_PUNCH_KB          := 0.0    # 0 = enemigo plantado (consistente con el combo)
+const RUN_PUNCH_RANGE       := 140.0  # alcance del recto (el brazo llega lejos)
+const RUN_PUNCH_FRICTION    := 500.0  # el lunge hacia adelante desacelera
+var tex_run_punch_frames: Array[Texture2D] = []
+var run_punch_frame_index := 0
+var run_punch_frame_timer := 0.0
+var run_punch_hold_timer  := 0.0
+var run_punch_dir         := 1.0
+var run_punch_hit_done    := false
 
 func _ready() -> void:
 	add_to_group("player")
@@ -222,6 +267,10 @@ func _ready() -> void:
 		tex_stand_frames.append(load("res://assets/sprites/player/stand/stand___%03d.png" % i))
 	for i in range(1, 27):
 		tex_crouch_walk_frames.append(load("res://assets/sprites/player/crouch_walk/crouch_walk___%03d.png" % i))
+	for i in range(1, 98):
+		tex_slide_frames.append(load("res://assets/sprites/player/slide/slide_%03d.png" % i))
+	for i in range(1, 98):
+		tex_run_punch_frames.append(load("res://assets/sprites/player/run_punch/run_punch_%03d.png" % i))
 	sprite.texture = tex_idle_frames[0]
 	if has_bengala:
 		_create_bengala()
@@ -256,6 +305,8 @@ func _physics_process(delta: float) -> void:
 		State.ATTACKING:         _handle_attacking(delta)
 		State.AIR_ATTACKING:     _handle_air_attacking(delta)
 		State.AIR_KICKING:       _handle_air_kicking(delta)
+		State.SLIDE:             _handle_slide(delta)
+		State.RUN_PUNCH:         _handle_run_punch(delta)
 		State.CROUCH_ATTACKING:  _handle_crouch_attacking(delta)
 	_update_collision()
 	_update_sprite()
@@ -285,7 +336,7 @@ func _tick_timers(delta: float) -> void:
 			walk_frame_index = (walk_frame_index + 1) % tex_walk_frames.size()
 	if state == State.RUN:
 		run_frame_timer += delta
-		if run_frame_timer >= 1.0 / RUN_FPS:
+		while run_frame_timer >= 1.0 / RUN_FPS:
 			run_frame_timer -= 1.0 / RUN_FPS
 			run_frame_index = (run_frame_index + 1) % tex_run_frames.size()
 	if state == State.STOP:
@@ -476,12 +527,7 @@ func _handle_ground(delta: float) -> void:
 
 		var dir := Input.get_axis("ui_left", "ui_right")
 		if dir != 0.0 and state == State.RUN:
-			facing_right       = dir > 0.0
-			sprite.flip_h      = not facing_right
-			crouch_frame_index = 2
-			crouch_frame_timer = 0.0
-			crouch_fast        = true
-			state              = State.CROUCH
+			_start_slide(dir)
 		elif dir != 0.0:
 			facing_right            = dir > 0.0
 			sprite.flip_h           = not facing_right
@@ -513,6 +559,9 @@ func _handle_ground(delta: float) -> void:
 		return
 
 	if combo_cooldown_timer <= 0.0 and Input.is_action_just_pressed("attack"):
+		if state == State.RUN:
+			_start_run_punch()
+			return
 		combo_step = 0
 		_launch_combo()
 		return
@@ -635,7 +684,10 @@ func _handle_jump_to_crouch(_delta: float) -> void:
 		velocity.x = 0.0
 	if is_on_floor() or jump_to_crouch_frame_index >= tex_jump_to_crouch_frames.size() - 1:
 		crouch_fast = false
-		if dir != 0.0:
+		if dir != 0.0 and is_on_floor():
+			# Tocó el piso con dirección → slide (o crouch-walk si el salto salió de walk).
+			_land_down_with_dir(dir)
+		elif dir != 0.0:
 			crouch_walk_frame_index = 0
 			crouch_walk_frame_timer = 0.0
 			state                   = State.CROUCH_WALK
@@ -751,18 +803,14 @@ func _handle_land(delta: float) -> void:
 	if Input.is_action_pressed("ui_down"):
 		var land_dir := Input.get_axis("ui_left", "ui_right")
 		if land_dir != 0.0:
-			facing_right       = land_dir > 0.0
-			sprite.flip_h      = not facing_right
-			velocity.x         = land_dir * (MAX_SPEED * 0.5)
-			crouch_frame_index = 4
-			crouch_frame_timer = 0.0
-			crouch_fast        = true
+			# ↓ + dirección al aterrizar → slide (o crouch-walk si el salto salió de walk).
+			_land_down_with_dir(land_dir)
 		else:
 			velocity.x         = 0.0
 			crouch_frame_index = 4
 			crouch_frame_timer = 0.0
 			crouch_fast        = true
-		state = State.CROUCH
+			state              = State.CROUCH
 		return
 	var dir := Input.get_axis("ui_left", "ui_right")
 	if dir != 0.0:
@@ -861,13 +909,8 @@ func _handle_air(delta: float) -> void:
 		if Input.is_action_pressed("ui_down"):
 			var land_dir := Input.get_axis("ui_left", "ui_right")
 			if land_dir != 0.0:
-				facing_right       = land_dir > 0.0
-				sprite.flip_h      = not facing_right
-				velocity.x         = land_dir * (MAX_SPEED * 0.5)
-				crouch_frame_index = 4
-				crouch_frame_timer = 0.0
-				crouch_fast        = true
-				state              = State.CROUCH
+				# Venías del aire con ↓ + dirección → al caer, slide (o crouch-walk si el salto salió de walk).
+				_land_down_with_dir(land_dir)
 			else:
 				velocity.x         = 0.0
 				crouch_frame_index = 4
@@ -1037,11 +1080,167 @@ func _handle_crouch_attacking(delta: float) -> void:
 	if attack_timer <= 0.0:
 		state = State.CROUCH
 
+# ── Slide (pop-up slide de béisbol) ──────────────────────────────────────────
+
+# Aterrizar con ↓ + dirección: solo el salto de RUN cae en slide. Cualquier salto
+# suave (walk, idle/parado, stop → todos con jump_from_walk=true) cae en caminar agachado.
+func _land_down_with_dir(land_dir: float) -> void:
+	if jump_from_walk:
+		facing_right            = land_dir > 0.0
+		sprite.flip_h           = not facing_right
+		crouch_walk_frame_index = 0
+		crouch_walk_frame_timer = 0.0
+		state                   = State.CROUCH_WALK
+	else:
+		_start_slide(land_dir)
+
+func _start_slide(dir: float) -> void:
+	facing_right      = dir > 0.0
+	sprite.flip_h     = not facing_right
+	slide_dir         = 1.0 if facing_right else -1.0
+	slide_frame_index = SLIDE_START_FRAME
+	slide_frame_timer = 0.0
+	slide_hold_timer  = 0.0
+	slide_hit_ids.clear()
+	velocity.x        = slide_dir * maxf(MAX_SPEED, absf(velocity.x))  # hereda el envión
+	state             = State.SLIDE
+
+func _handle_slide(delta: float) -> void:
+	# Se desplaza a la MISMA velocidad que el run, constante, durante todo el slide.
+	velocity.x = slide_dir * MAX_SPEED
+	if slide_frame_index <= SLIDE_HIT_END:
+		_slide_sweep()
+
+	# Avance de frames rápido, pero se congela en SLIDE_HOLD_FRAME (slide_030)
+	# durante SLIDE_HOLD_DUR mientras sigue deslizándose por el piso.
+	if slide_frame_index == SLIDE_HOLD_FRAME and slide_hold_timer < SLIDE_HOLD_DUR:
+		slide_hold_timer += delta
+	else:
+		# Al salir del congelado (frame 30 en adelante) va mucho más rápido a run.
+		# while (no if): permite avanzar varios frames por tick de física, así FPS > 60
+		# realmente acelera la animación en vez de quedar capado a la tasa de física.
+		var sfps := SLIDE_EXIT_FPS if slide_frame_index >= SLIDE_HOLD_FRAME else SLIDE_FPS
+		slide_frame_timer += delta
+		while slide_frame_timer >= 1.0 / sfps and slide_frame_index < SLIDE_END_FRAME:
+			slide_frame_timer -= 1.0 / sfps
+			slide_frame_index += 1
+
+	# Encadena directo a caminar agachado: si venís apretando ↓ + dirección no hace falta
+	# terminar de pararse, cortá en SLIDE_CROUCHWALK_FRAME (slide_062) y pasá a crouch-walk.
+	if slide_frame_index >= SLIDE_CROUCHWALK_FRAME and Input.is_action_pressed("ui_down"):
+		var cw_dir := Input.get_axis("ui_left", "ui_right")
+		if cw_dir != 0.0:
+			facing_right            = cw_dir > 0.0
+			sprite.flip_h           = not facing_right
+			crouch_walk_frame_index = 0
+			crouch_walk_frame_timer = 0.0
+			state                   = State.CROUCH_WALK
+			return
+
+	# Terminó de levantarse → según el input que mantengas.
+	if slide_frame_index >= SLIDE_END_FRAME:
+		var dir := Input.get_axis("ui_left", "ui_right")
+		if Input.is_action_pressed("ui_down"):
+			# Sigue agachado: caminar agachado si hay dirección, si no crouch quieto.
+			if dir != 0.0:
+				facing_right            = dir > 0.0
+				sprite.flip_h           = not facing_right
+				crouch_walk_frame_index = 0
+				crouch_walk_frame_timer = 0.0
+				state                   = State.CROUCH_WALK
+			else:
+				velocity.x         = 0.0
+				crouch_fast        = false
+				crouch_frame_index = tex_crouch_frames.size() - 1
+				crouch_frame_timer = 0.0
+				state              = State.CROUCH
+		elif dir != 0.0:
+			facing_right  = dir > 0.0
+			sprite.flip_h = not facing_right
+			if Input.is_key_pressed(KEY_SHIFT):
+				walk_frame_index = 0
+				walk_frame_timer = 0.0
+				velocity.x       = dir * (MAX_SPEED * 0.3)
+				state            = State.WALK
+			else:
+				run_frame_index = 0
+				run_frame_timer = 0.0
+				velocity.x      = dir * MAX_SPEED
+				state           = State.RUN
+		else:
+			velocity.x       = 0.0
+			idle_frame_index = 0
+			idle_frame_timer = 0.0
+			state            = State.IDLE
+
+# Barre enemigos a su paso: cada enemigo recibe el golpe una sola vez.
+func _slide_sweep() -> void:
+	for enemy in get_tree().get_nodes_in_group("enemy"):
+		var e := enemy as Node2D
+		if not e: continue
+		var id := e.get_instance_id()
+		if slide_hit_ids.has(id): continue
+		var dx: float = e.global_position.x - global_position.x
+		var dy: float = abs(e.global_position.y - global_position.y)
+		if abs(dx) < SLIDE_RANGE and dy < HIT_RANGE_Y and (dx > 0.0) == facing_right:
+			if e.has_method("take_damage"):
+				e.call("take_damage", 1, dx < 0.0, SLIDE_HIT_KB)
+				slide_hit_ids[id] = true
+
+# ── Puñetazo corriendo (run punch) ───────────────────────────────────────────
+
+func _start_run_punch() -> void:
+	run_punch_dir         = 1.0 if facing_right else -1.0
+	run_punch_frame_index = RUN_PUNCH_START_FRAME
+	run_punch_frame_timer = 0.0
+	run_punch_hold_timer  = 0.0
+	run_punch_hit_done    = false
+	velocity.x            = run_punch_dir * maxf(MAX_SPEED, absf(velocity.x))  # hereda el envión del run
+	state                 = State.RUN_PUNCH
+
+func _handle_run_punch(delta: float) -> void:
+	# Lunge hacia adelante que desacelera durante el golpe.
+	velocity.x = move_toward(velocity.x, 0.0, RUN_PUNCH_FRICTION * delta)
+
+	# Golpe: registra una sola vez al llegar al frame de impacto, con hitstop + shake.
+	if not run_punch_hit_done and run_punch_frame_index >= RUN_PUNCH_IMPACT:
+		run_punch_hit_done = true
+		if _try_hit_enemies_kb(RUN_PUNCH_DMG, RUN_PUNCH_KB, RUN_PUNCH_RANGE):
+			_do_hitstop(HITSTOP_DUR)
+			shake_amount = SHAKE_AMOUNT
+		_try_open_door()
+
+	# Avance: entra rápido al golpe, se congela en HOLD_FRAME, sale rápido a run.
+	if run_punch_frame_index == RUN_PUNCH_HOLD_FRAME and run_punch_hold_timer < RUN_PUNCH_HOLD_DUR:
+		run_punch_hold_timer += delta
+	else:
+		var pfps := RUN_PUNCH_EXIT_FPS if run_punch_frame_index >= RUN_PUNCH_HOLD_FRAME else RUN_PUNCH_FPS
+		run_punch_frame_timer += delta
+		while run_punch_frame_timer >= 1.0 / pfps and run_punch_frame_index < RUN_PUNCH_END_FRAME:
+			run_punch_frame_timer -= 1.0 / pfps
+			run_punch_frame_index += 1
+
+	# Terminó → run si mantenés dirección, si no idle.
+	if run_punch_frame_index >= RUN_PUNCH_END_FRAME:
+		var dir := Input.get_axis("ui_left", "ui_right")
+		if dir != 0.0:
+			facing_right    = dir > 0.0
+			sprite.flip_h   = not facing_right
+			run_frame_index = 0
+			run_frame_timer = 0.0
+			velocity.x      = dir * MAX_SPEED
+			state           = State.RUN
+		else:
+			velocity.x       = 0.0
+			idle_frame_index = 0
+			idle_frame_timer = 0.0
+			state            = State.IDLE
+
 # ── Colisión y sprite ─────────────────────────────────────────────────────────
 
 func _update_collision() -> void:
 	var cap := collision.shape as CapsuleShape2D
-	if state in [State.CROUCH, State.CROUCH_WALK, State.ROLL, State.CROUCH_ATTACKING]:
+	if state in [State.CROUCH, State.CROUCH_WALK, State.ROLL, State.CROUCH_ATTACKING, State.SLIDE]:
 		cap.height           = 38.0
 		collision.position.y = 15.0
 	else:
@@ -1088,6 +1287,12 @@ func _update_sprite() -> void:
 		State.AIR_KICKING:
 			if tex_air_kick_frames.size() > 0:
 				sprite.texture = tex_air_kick_frames[air_kick_frame_index]
+		State.SLIDE:
+			if tex_slide_frames.size() > 0:
+				sprite.texture = tex_slide_frames[slide_frame_index]
+		State.RUN_PUNCH:
+			if tex_run_punch_frames.size() > 0:
+				sprite.texture = tex_run_punch_frames[run_punch_frame_index]
 		State.ATTACKING, State.AIR_ATTACKING:
 			match current_attack:
 				AttackType.JAB:
@@ -1142,6 +1347,7 @@ func _radial_texture(size: int, color: Color) -> ImageTexture:
 
 func _separate_from_enemies(_delta: float) -> void:
 	if not is_on_floor(): return
+	if state == State.SLIDE: return   # durante la barrida atraviesa a los enemigos
 	const MIN_SEP := 88.0
 	for enemy in get_tree().get_nodes_in_group("enemy"):
 		var e := enemy as Node2D
