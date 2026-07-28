@@ -7,7 +7,7 @@ const DETECT_RANGE   := 380.0
 const CLOSE_RANGE    := 230.0
 const ATTACK_RANGE   := 260.0
 const KICK_RANGE     := 85.0
-const ATTACK_CDN     := 0.25
+const ATTACK_CDN     := 0.10
 const HURT_KNOCKBACK := 220.0
 const KNOCKBACK_DEC  := 480.0
 
@@ -22,7 +22,7 @@ const PLAYER_KNOCKBACK  := 0.0    # el machetazo no empuja
 const KICK_KNOCKBACK    := 220.0  # la patada empuja (~46px de distancia)
 
 # Cuantos golpes seguidos de cerca aguanta antes de responder con patada
-const CLOSE_HITS_FOR_KICK := 2
+const CLOSE_HITS_FOR_KICK := 1
 
 # Burst walk: camina UN ciclo completo de frames, pausa WALK_PAUSE segundos, repite
 const WALK_PAUSE := 2.0
@@ -34,11 +34,11 @@ const IDLE_TO_WALK_FPS    := 24.0
 const IDLE_TO_WALK_FRAMES := 29
 const WALK_FPS            := 24.0
 const WALK_FRAMES         := 90
-const ATTACK_FPS          := 66.0
+const ATTACK_FPS          := 90.0
 const ATTACK_FRAMES       := 56
-const KICK_FPS            := 40.0
+const KICK_FPS            := 60.0
 const KICK_FRAMES         := 73
-const HURT_FPS            := 58.0
+const HURT_FPS            := 80.0
 const HURT_FRAMES         := 43
 const DEATH_FPS           := 15.0
 const DEATH_FRAMES        := 73

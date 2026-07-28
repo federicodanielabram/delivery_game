@@ -251,11 +251,11 @@ func _do_alert(delta: float) -> void:
 	if dist <= THROW_RANGE and throw_timer <= 0.0 and _is_on_screen():
 		if throw_burst_left > 0:
 			throw_burst_left -= 1
-			throw_timer = randf_range(0.90, 1.25)
-			sprite.speed_scale = 1.6
+			throw_timer = randf_range(0.40, 0.65)
+			sprite.speed_scale = 2.2
 		else:
-			throw_burst_left = randi_range(2, 3)
-			throw_timer = randf_range(2.20, 3.10)
+			throw_burst_left = randi_range(3, 4)
+			throw_timer = randf_range(1.10, 1.70)
 			sprite.speed_scale = 1.0
 		state = State.THROW
 		sprite.play("throw")

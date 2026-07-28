@@ -49,9 +49,9 @@ func _ready() -> void:
 	_set_camera_limit()
 
 	# Mozos (tiran platos) repartidos a lo largo del nivel, antes del boss (~14600)
-	_spawn_waiter(3000)
-	_spawn_waiter_light(8000)
-	_spawn_waiter_dark(13000)
+	#_spawn_waiter(3000)
+	#_spawn_waiter_light(8000)
+	#_spawn_waiter_dark(13000)
 
 func _set_camera_limit() -> void:
 	var player := get_tree().get_first_node_in_group("player") as Node2D

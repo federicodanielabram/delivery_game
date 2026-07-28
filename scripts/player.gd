@@ -1,7 +1,7 @@
 extends CharacterBody2D
 
 # ── Física ───────────────────────────────────────────────────────────────────
-const MAX_SPEED    := 380.0
+const MAX_SPEED    := 440.0
 const ACCELERATION := 2000.0
 const FRICTION     := 600.0
 const JUMP_FORCE          := -531.0
@@ -47,10 +47,11 @@ const SHAKE_AMOUNT       := 9.0    # amplitud inicial del screen shake
 const SHAKE_DECAY        := 45.0
 const MAX_HP        := 5
 const IFRAME_DUR    := 1.0    # segundos de invulnerabilidad tras recibir golpe
+const DEATH_FADE_DUR := 1.5
 const HIT_RANGE_X   := 112.0  # alcance horizontal del golpe
 const HIT_RANGE_Y   := 52.0   # tolerancia vertical
 
-enum State      { IDLE, WALK, RUN, STOP, RUN_JUMP, JUMP_SQUAT, JUMP, FALL, LAND, JUMP_TO_CROUCH, CROUCH, CROUCH_WALK, STAND, ROLL, ATTACKING, AIR_ATTACKING, CROUCH_ATTACKING, AIR_KICKING, SLIDE, RUN_PUNCH }
+enum State      { IDLE, WALK, RUN, STOP, RUN_JUMP, JUMP_SQUAT, JUMP, FALL, LAND, JUMP_TO_CROUCH, CROUCH, CROUCH_WALK, STAND, ROLL, ATTACKING, AIR_ATTACKING, CROUCH_ATTACKING, AIR_KICKING, SLIDE, RUN_PUNCH, DEAD }
 enum AttackType { JAB, HOOK, UPPERCUT, SWEEP, KICK, CROUCH_KICK, AIR_PUNCH, AIR_DOWN_KICK, THROW, FLYING_KICK }
 
 var state          := State.IDLE
@@ -68,6 +69,7 @@ var combo_cooldown_timer := 0.0
 
 var hp             := MAX_HP
 var iframe_timer   := 0.0
+var death_timer    := 0.0
 var knockback_vel  := 0.0     # velocidad horizontal de empuje al recibir daño
 var hitstun_timer  := 0.0     # bloqueo de input mientras dura el empuje
 
@@ -227,6 +229,7 @@ var run_punch_frame_timer := 0.0
 var run_punch_hold_timer  := 0.0
 var run_punch_dir         := 1.0
 var run_punch_hit_done    := false
+var run_punch_used        := false
 
 func _ready() -> void:
 	add_to_group("player")
@@ -279,6 +282,11 @@ func _physics_process(delta: float) -> void:
 	_apply_gravity(delta)
 	_tick_timers(delta)
 
+	if state == State.DEAD:
+		_handle_dead(delta)
+		_update_sprite()
+		return
+
 	# Durante el empuje (hitstun) el input no responde: solo el knockback mueve al pj.
 	# Recien cuando termina el alejamiento vuelve el control normal.
 	if hitstun_timer > 0.0:
@@ -318,6 +326,7 @@ func _physics_process(delta: float) -> void:
 	move_and_slide()
 
 func _apply_gravity(delta: float) -> void:
+	if state == State.DEAD: return
 	if not is_on_floor():
 		velocity.y += GRAVITY * delta
 
@@ -427,20 +436,33 @@ func _tick_timers(delta: float) -> void:
 			throw_can_spawned = true
 			_spawn_can()
 
+# ── Muerte ───────────────────────────────────────────────────────────────────
+
+func _die() -> void:
+	state         = State.DEAD
+	velocity      = Vector2.ZERO
+	death_timer   = DEATH_FADE_DUR
+	collision.set_deferred("disabled", true)
+
+func _handle_dead(delta: float) -> void:
+	velocity    = Vector2.ZERO
+	death_timer = max(death_timer - delta, 0.0)
+	if death_timer <= 0.0:
+		get_tree().reload_current_scene()
+
 # ── Daño recibido ─────────────────────────────────────────────────────────────
 
 func take_damage(amount: int, from_right: bool, knockback: float = 200.0) -> void:
+	if state == State.DEAD: return
 	if iframe_timer > 0.0: return
 	hp            = hp - amount
 	iframe_timer  = IFRAME_DUR
 	velocity.x    = 0.0
 	knockback_vel = knockback * (1.0 if from_right else -1.0)
-	# Bloquear input mientras dura el empuje (tiempo que tarda en frenar el knockback)
 	if knockback != 0.0:
 		hitstun_timer = absf(knockback) / 520.0
-	# Vida infinita por ahora: al llegar a 0 se recarga para seguir viendo la interfaz
 	if hp <= 0:
-		hp = MAX_HP
+		_die()
 
 # ── Golpear enemigos ──────────────────────────────────────────────────────────
 
@@ -559,9 +581,6 @@ func _handle_ground(delta: float) -> void:
 		return
 
 	if combo_cooldown_timer <= 0.0 and Input.is_action_just_pressed("attack"):
-		if state == State.RUN:
-			_start_run_punch()
-			return
 		combo_step = 0
 		_launch_combo()
 		return
@@ -606,6 +625,7 @@ func _handle_ground(delta: float) -> void:
 			stop_frame_index = 0
 			stop_frame_timer = 0.0
 			stop_from_walk   = false
+			run_punch_used   = false
 			state = State.STOP
 		elif state == State.WALK:
 			stop_frame_index = 3
@@ -1108,8 +1128,6 @@ func _start_slide(dir: float) -> void:
 func _handle_slide(delta: float) -> void:
 	# Se desplaza a la MISMA velocidad que el run, constante, durante todo el slide.
 	velocity.x = slide_dir * MAX_SPEED
-	if slide_frame_index <= SLIDE_HIT_END:
-		_slide_sweep()
 
 	# Avance de frames rápido, pero se congela en SLIDE_HOLD_FRAME (slide_030)
 	# durante SLIDE_HOLD_DUR mientras sigue deslizándose por el piso.
@@ -1195,6 +1213,7 @@ func _start_run_punch() -> void:
 	run_punch_frame_timer = 0.0
 	run_punch_hold_timer  = 0.0
 	run_punch_hit_done    = false
+	run_punch_used        = true
 	velocity.x            = run_punch_dir * maxf(MAX_SPEED, absf(velocity.x))  # hereda el envión del run
 	state                 = State.RUN_PUNCH
 
@@ -1316,8 +1335,10 @@ func _update_sprite() -> void:
 				_:
 					sprite.texture = tex_attack
 
-	# Parpadeo durante invulnerabilidad
-	sprite.modulate.a = 0.35 if (iframe_timer > 0.0 and int(iframe_timer * 10) % 2 == 0) else 1.0
+	if state == State.DEAD:
+		sprite.modulate.a = death_timer / DEATH_FADE_DUR
+	else:
+		sprite.modulate.a = 0.35 if (iframe_timer > 0.0 and int(iframe_timer * 10) % 2 == 0) else 1.0
 
 # ── Bengala de luz ───────────────────────────────────────────────────────────
 
@@ -1347,7 +1368,6 @@ func _radial_texture(size: int, color: Color) -> ImageTexture:
 
 func _separate_from_enemies(_delta: float) -> void:
 	if not is_on_floor(): return
-	if state == State.SLIDE: return   # durante la barrida atraviesa a los enemigos
 	const MIN_SEP := 88.0
 	for enemy in get_tree().get_nodes_in_group("enemy"):
 		var e := enemy as Node2D
@@ -1359,7 +1379,12 @@ func _separate_from_enemies(_delta: float) -> void:
 		if overlap > 0.0:
 			var push: float = sign(dx) if abs(dx) > 0.5 else 1.0
 			global_position.x += push * overlap * 0.75
-			velocity.x         = push * absf(velocity.x + 20.0)
+			if state == State.SLIDE:
+				velocity.x        = 0.0
+				slide_hold_timer  = SLIDE_HOLD_DUR
+				slide_frame_index = SLIDE_END_FRAME
+			else:
+				velocity.x = push * absf(velocity.x + 20.0)
 
 func _try_open_door() -> void:
 	for door in get_tree().get_nodes_in_group("door"):

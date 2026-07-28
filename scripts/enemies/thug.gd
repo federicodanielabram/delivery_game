@@ -81,6 +81,10 @@ func _refresh_hp_bar() -> void:
 
 # ── Loop principal ─────────────────────────────────────────────────────────
 func _physics_process(delta: float) -> void:
+	if state == State.DEAD:
+		velocity = Vector2.ZERO
+		return
+
 	if not is_on_floor():
 		velocity.y += GRAVITY * delta
 

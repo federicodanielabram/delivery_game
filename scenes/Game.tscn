@@ -4,6 +4,14 @@
 [ext_resource type="PackedScene" path="res://scenes/Player.tscn" id="2"]
 [ext_resource type="Script" path="res://scripts/checkerboard.gd" id="3"]
 [ext_resource type="PackedScene" path="res://scenes/enemies/Boss.tscn" id="4"]
+[ext_resource type="Texture2D" path="res://assets/backgrounds/bg_city_far.png" id="5"]
+[ext_resource type="Script" path="res://scripts/bg_scroll.gd" id="6"]
+[ext_resource type="Texture2D" path="res://assets/backgrounds/bg_mid.png" id="7"]
+[ext_resource type="Texture2D" path="res://assets/backgrounds/bg_sidewalk.png" id="10"]
+[ext_resource type="Texture2D" path="res://assets/backgrounds/bg_floor.png" id="11"]
+[ext_resource type="Script" path="res://scripts/floor_draw.gd" id="8"]
+[ext_resource type="Script" path="res://scripts/buildings_layer.gd" id="9"]
+
 
 [sub_resource type="RectangleShape2D" id="RectangleShape2D_1"]
 size = Vector2(15360, 16)
@@ -12,7 +20,63 @@ size = Vector2(15360, 16)
 script = ExtResource("1")
 
 [node name="Background" type="Node2D" parent="." unique_id=575400042]
+visible = false
 script = ExtResource("3")
+
+[node name="BGScroll" type="Node2D" parent="."]
+script = ExtResource("6")
+parallax = 0.02
+
+[node name="SpriteA" type="Sprite2D" parent="BGScroll"]
+texture = ExtResource("5")
+
+[node name="SpriteB" type="Sprite2D" parent="BGScroll"]
+
+[node name="SpriteC" type="Sprite2D" parent="BGScroll"]
+
+
+
+[node name="MidScroll" type="Node2D" parent="."]
+script = ExtResource("6")
+parallax = 1.17
+
+[node name="SpriteA" type="Sprite2D" parent="MidScroll"]
+texture = ExtResource("7")
+
+[node name="SpriteB" type="Sprite2D" parent="MidScroll"]
+
+[node name="SpriteC" type="Sprite2D" parent="MidScroll"]
+
+[node name="SidewalkScroll" type="Node2D" parent="."]
+script = ExtResource("6")
+parallax = 1.2
+
+[node name="SpriteA" type="Sprite2D" parent="SidewalkScroll"]
+texture = ExtResource("10")
+
+[node name="SpriteB" type="Sprite2D" parent="SidewalkScroll"]
+
+[node name="SpriteC" type="Sprite2D" parent="SidewalkScroll"]
+
+[node name="BuildingsLayer" type="Node2D" parent="."]
+script = ExtResource("9")
+
+[node name="FloorScroll" type="Node2D" parent="."]
+position = Vector2(0, 653)
+script = ExtResource("6")
+parallax = 1.2
+
+[node name="SpriteA" type="Sprite2D" parent="FloorScroll"]
+texture = ExtResource("11")
+
+[node name="SpriteB" type="Sprite2D" parent="FloorScroll"]
+
+[node name="SpriteC" type="Sprite2D" parent="FloorScroll"]
+
+[node name="FloorDraw" type="Node2D" parent="."]
+visible = false
+position = Vector2(0, 653)
+script = ExtResource("8")
 
 [node name="Floor" type="StaticBody2D" parent="." unique_id=773859343]
 position = Vector2(7680, 680)
@@ -27,4 +91,5 @@ color = Color(1, 1, 1, 1)
 position = Vector2(80, 600)
 
 [node name="Boss" parent="." instance=ExtResource("4")]
+visible = false
 position = Vector2(14600, 560)
