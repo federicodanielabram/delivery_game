@@ -11,10 +11,16 @@
 [ext_resource type="Texture2D" path="res://assets/backgrounds/bg_floor.png" id="11"]
 [ext_resource type="Script" path="res://scripts/floor_draw.gd" id="8"]
 [ext_resource type="Script" path="res://scripts/buildings_layer.gd" id="9"]
+[ext_resource type="Script" path="res://scripts/smoke_layer.gd" id="12"]
+[ext_resource type="Script" path="res://scripts/drone.gd" id="13"]
+[ext_resource type="Script" path="res://scripts/streetlamp_layer.gd" id="14"]
+[ext_resource type="Script" path="res://scripts/puddle_layer.gd" id="15"]
+[ext_resource type="Script" path="res://scripts/traffic_rear_layer.gd" id="16"]
+[ext_resource type="Script" path="res://scripts/traffic_front_layer.gd" id="18"]
 
 
 [sub_resource type="RectangleShape2D" id="RectangleShape2D_1"]
-size = Vector2(15360, 16)
+size = Vector2(32000, 16)
 
 [node name="Game" type="Node2D" unique_id=839482285]
 script = ExtResource("1")
@@ -34,7 +40,16 @@ texture = ExtResource("5")
 
 [node name="SpriteC" type="Sprite2D" parent="BGScroll"]
 
-
+[node name="SmokeFar" type="Node2D" parent="."]
+script = ExtResource("12")
+particle_count = 30
+lifetime = 25.0
+speed_min = 1.0
+speed_max = 4.0
+scale_min = 3.0
+scale_max = 5.5
+smoke_color = Color(0.85, 0.87, 0.92, 0.375)
+emit_extents = Vector2(800, 400)
 
 [node name="MidScroll" type="Node2D" parent="."]
 script = ExtResource("6")
@@ -58,8 +73,35 @@ texture = ExtResource("10")
 
 [node name="SpriteC" type="Sprite2D" parent="SidewalkScroll"]
 
+[node name="SmokeNear" type="Node2D" parent="."]
+z_index = 10
+script = ExtResource("12")
+particle_count = 50
+lifetime = 15.0
+speed_min = 2.0
+speed_max = 6.0
+scale_min = 2.0
+scale_max = 4.0
+smoke_color = Color(0.82, 0.84, 0.88, 0.0125)
+emit_extents = Vector2(800, 320)
+parallax = 1.2
+y_offset = 180.0
+
 [node name="BuildingsLayer" type="Node2D" parent="."]
 script = ExtResource("9")
+
+[node name="StreetlampLayer" type="Node2D" parent="."]
+z_index = 1
+script = ExtResource("14")
+
+[node name="PuddleLayer" type="Node2D" parent="."]
+script = ExtResource("15")
+
+[node name="TrafficRearLayer" type="Node2D" parent="."]
+script = ExtResource("16")
+
+[node name="TrafficFrontLayer" type="Node2D" parent="."]
+script = ExtResource("18")
 
 [node name="FloorScroll" type="Node2D" parent="."]
 position = Vector2(0, 653)
@@ -79,7 +121,7 @@ position = Vector2(0, 653)
 script = ExtResource("8")
 
 [node name="Floor" type="StaticBody2D" parent="." unique_id=773859343]
-position = Vector2(7680, 680)
+position = Vector2(16000, 680)
 
 [node name="FloorShape" type="CollisionShape2D" parent="Floor" unique_id=1630982186]
 shape = SubResource("RectangleShape2D_1")
@@ -89,7 +131,13 @@ color = Color(1, 1, 1, 1)
 
 [node name="Player" parent="." unique_id=2111735036 instance=ExtResource("2")]
 position = Vector2(80, 600)
+z_index = 3
+
+[node name="Drone" type="Node2D" parent="."]
+z_index = 3
+script = ExtResource("13")
 
 [node name="Boss" parent="." instance=ExtResource("4")]
 visible = false
-position = Vector2(14600, 560)
+position = Vector2(29500, 560)
+z_index = 3

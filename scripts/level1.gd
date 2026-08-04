@@ -6,8 +6,7 @@ const WAITER_DARK_SCENE  := preload("res://scenes/enemies/WaiterDark.tscn")
 const WAITER_LIGHT_SCENE := preload("res://scenes/enemies/WaiterLight.tscn")
 const HUD_SCENE          := preload("res://scenes/HUD.tscn")
 
-# Largo del nivel (6x el original de 2560)
-const LEVEL_LENGTH := 15360.0
+const LEVEL_LENGTH := 32000.0
 
 # Colores de obstáculos
 const COL_PLATFORM := Color(0.15, 0.15, 0.2,  1.0)
@@ -16,6 +15,7 @@ const COL_BOX      := Color(0.6,  0.4,  0.1,  1.0)
 const COL_TUNNEL   := Color(0.12, 0.12, 0.18, 1.0)
 const COL_DOOR     := Color(0.55, 0.28, 0.08, 1.0)
 const COL_FLOOR    := Color(0.15, 0.15, 0.2,  1.0)
+
 
 # Plataformas elevadas [x_centro, y, ancho]
 const PLATFORMS := [
@@ -41,17 +41,54 @@ func _ready() -> void:
 	## Puerta de madera (hay que golpear con Z)
 	#_create_door(1000)
 
+	# Tinte nocturno en capas intermedias (el fondo lejano queda intacto)
+	var night := Color(0.40, 0.35, 0.50)
+	for path in ["MidScroll", "SidewalkScroll", "FloorScroll", "BuildingsLayer",
+				 "TrafficRearLayer", "TrafficFrontLayer"]:
+		var n := get_node_or_null(path)
+		if n:
+			n.modulate = night
+
+	# Las luces (drone, faroles) no afectan el fondo ni el humo
+	for path in ["BGScroll", "SmokeFar", "SmokeNear"]:
+		var n := get_node_or_null(path)
+		if n:
+			_disable_lighting(n)
+
+	# MidScroll: sin luces de faroles, solo luces del drone a mitad de intensidad
+	# Usamos light_mask=2 para que los faroles (mask=1) no la afecten
+	var mid := get_node_or_null("MidScroll")
+	if mid:
+		_disable_lighting(mid)
+		for child in mid.get_children():
+			if child is CanvasItem:
+				(child as CanvasItem).light_mask = 2
+
+	var night_char := Color(0.72, 0.68, 0.82)
+	var player := get_node_or_null("Player")
+	if player:
+		player.modulate = night_char
+
 	# HUD
 	var hud: Node = HUD_SCENE.instantiate()
 	add_child(hud)
 
-	# Extender el límite de cámara al largo del nivel
+	# Pizzeria: edificio frontal final
+	_create_pizzeria(30000.0)
+
+	# Límite de cámara
 	_set_camera_limit()
 
 	# Mozos (tiran platos) repartidos a lo largo del nivel, antes del boss (~14600)
 	#_spawn_waiter(3000)
 	#_spawn_waiter_light(8000)
 	#_spawn_waiter_dark(13000)
+
+func _disable_lighting(node: Node) -> void:
+	if node is CanvasItem:
+		(node as CanvasItem).light_mask = 0
+	for child in node.get_children():
+		_disable_lighting(child)
 
 func _set_camera_limit() -> void:
 	var player := get_tree().get_first_node_in_group("player") as Node2D
@@ -156,6 +193,28 @@ func _add_tunnel_pillar(x: float, ceil_y: float) -> void:
 	rect.size     = Vector2(8.0, h)
 	rect.color    = COL_TUNNEL
 	add_child(rect)
+
+# ── Pizzeria (edificio frontal al final del mapa) ───────────────────────────
+func _create_pizzeria(cx: float) -> void:
+	const FLOOR_Y    := 655.0
+	const IMG_W      := 2172.0
+	const IMG_H      := 724.0
+	const TARGET_H   := 380.0          # alto en world-space
+	const SCALE      := TARGET_H / IMG_H
+
+	var tex := load("res://assets/buildings/pizzeria.png") as Texture2D
+	if not tex:
+		push_error("Pizzeria: no se encontró res://assets/buildings/pizzeria.png")
+		return
+
+	var sp := Sprite2D.new()
+	sp.name     = "Pizzeria"
+	sp.texture  = tex
+	sp.centered = false
+	sp.scale    = Vector2(SCALE, SCALE)
+	sp.position = Vector2(cx - IMG_W * SCALE / 2.0, FLOOR_Y - TARGET_H)
+	sp.z_index  = 0
+	add_child(sp)
 
 # ── Puerta (obstacle: golpear con Z) ────────────────────────────────────────
 func _create_door(x: float) -> void:

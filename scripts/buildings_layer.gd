@@ -1,7 +1,7 @@
 extends Node2D
 
 @export var parallax: float = 1.2
-const LEVEL_WIDTH: int = 15360
+const LEVEL_WIDTH: int = 32000
 const FLOOR_Y: int = 655
 const ALPHA_THRESHOLD: int = 10
 

@@ -1,13 +1,13 @@
 extends CharacterBody2D
 
 # ── Física ───────────────────────────────────────────────────────────────────
-const MAX_SPEED    := 440.0
-const ACCELERATION := 2000.0
+const MAX_SPEED    := 528.0
+const ACCELERATION := 2400.0
 const FRICTION     := 600.0
 const JUMP_FORCE          := -531.0
 const RUN_JUMP_FORCE      := -531.0
-const RUN_JUMP_SPEED      := 500.0   # velocidad horizontal del salto desde run (más envión que correr)
-const IDLE_JUMP_AIR_SPEED := 350.0   # salto desde idle: velocidad al presionar dirección en el aire (casi el doble del walk)
+const RUN_JUMP_SPEED      := 600.0   # velocidad horizontal del salto desde run (más envión que correr)
+const IDLE_JUMP_AIR_SPEED := 420.0   # salto desde idle: velocidad al presionar dirección en el aire (casi el doble del walk)
 const AIR_BRAKE           := 1200.0  # en el aire, presionar la dirección inversa frena fuerte (en vez de darse vuelta)
 const JUMP_SQUAT_DUR      := 0.133
 const RUN_JUMP_SQUAT_DUR  := 2.0 / 24.0
@@ -83,6 +83,11 @@ var _hitstop_active  := false
 
 @export var has_bengala: bool = false
 var _bengala: Node2D = null
+
+var _shadow: Sprite2D = null
+var _shadow_floor_y := 0.0
+const SHADOW_FEET_OFFSET := 82.0
+const SHADOW_MAX_HEIGHT  := 200.0
 
 var tex_attack: Texture2D
 
@@ -233,7 +238,7 @@ var run_punch_used        := false
 
 func _ready() -> void:
 	add_to_group("player")
-	z_index = 1
+	z_index = 3
 	_cam_base_offset = camera.offset
 	tex_attack = load("res://assets/sprites/player/player_punch.png")
 	for i in range(1, JAB_FRAMES + 1):
@@ -275,6 +280,7 @@ func _ready() -> void:
 	for i in range(1, 98):
 		tex_run_punch_frames.append(load("res://assets/sprites/player/run_punch/run_punch_%03d.png" % i))
 	sprite.texture = tex_idle_frames[0]
+	_create_shadow()
 	if has_bengala:
 		_create_bengala()
 
@@ -1186,10 +1192,10 @@ func _handle_slide(delta: float) -> void:
 				velocity.x      = dir * MAX_SPEED
 				state           = State.RUN
 		else:
-			velocity.x       = 0.0
-			idle_frame_index = 0
-			idle_frame_timer = 0.0
-			state            = State.IDLE
+			stop_frame_index = 0
+			stop_frame_timer = 0.0
+			stop_from_walk   = false
+			state            = State.STOP
 
 # Barre enemigos a su paso: cada enemigo recibe el golpe una sola vez.
 func _slide_sweep() -> void:
@@ -1339,6 +1345,44 @@ func _update_sprite() -> void:
 		sprite.modulate.a = death_timer / DEATH_FADE_DUR
 	else:
 		sprite.modulate.a = 0.35 if (iframe_timer > 0.0 and int(iframe_timer * 10) % 2 == 0) else 1.0
+
+# ── Sombra blob ──────────────────────────────────────────────────────────────
+
+func _process(_delta: float) -> void:
+	_update_shadow()
+
+func _create_shadow() -> void:
+	_shadow = Sprite2D.new()
+	_shadow.z_index = -1
+	var w := 80
+	var h := 28
+	var img := Image.create(w, h, false, Image.FORMAT_RGBA8)
+	var cx := w * 0.5
+	var cy := h * 0.5
+	for x in range(w):
+		for y in range(h):
+			var dx := (x - cx) / cx
+			var dy := (y - cy) / cy
+			var a := clampf(1.0 - sqrt(dx * dx + dy * dy), 0.0, 1.0)
+			img.set_pixel(x, y, Color(0.0, 0.0, 0.0, a))
+	_shadow.texture = ImageTexture.create_from_image(img)
+	add_child(_shadow)
+	move_child(_shadow, 0)
+
+func _update_shadow() -> void:
+	if _shadow == null: return
+	if state == State.DEAD:
+		_shadow.visible = false
+		return
+	_shadow.visible = true
+	if is_on_floor():
+		_shadow_floor_y = global_position.y + SHADOW_FEET_OFFSET
+	var air_h := maxf(0.0, _shadow_floor_y - (global_position.y + SHADOW_FEET_OFFSET))
+	var t := clampf(air_h / SHADOW_MAX_HEIGHT, 0.0, 1.0)
+	_shadow.position = Vector2(0.0, _shadow_floor_y - global_position.y)
+	var s := lerpf(1.0, 0.3, t)
+	_shadow.scale = Vector2(s, s)
+	_shadow.modulate.a = lerpf(0.5, 0.05, t)
 
 # ── Bengala de luz ───────────────────────────────────────────────────────────
 
