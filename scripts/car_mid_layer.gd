@@ -85,6 +85,32 @@ const CAR_CONTOURS: Dictionary = {
 	7: [0, 365, 366, 366, 367, 366, 355, 345, 337, 329, 323, 328, 334, 340, 345, 348, 351, 354, 357, 361, 365, 371, 379, 387, 395, 402, 408, 412, 416, 420, 424, 428, 430, 432, 433, 434, 433, 431, 430, 428, 424, 420, 416, 410, 402, 395, 386, 377, 368, 358, 349, 341, 335, 330, 327, 324, 322, 320, 318, 317, 318, 319, 319, 321, 321, 319, 317, 314, 309, 301, 293, 301, 309, 319, 331, 344, 341, 334, 326, 314, 300, 284, 270, 255, 241, 216, 207, 195, 0],
 }
 
+# ── Tipos de obstáculo ────────────────────────────────────────────────────────
+const OBS_GROUND := 0   # auto en el piso
+const OBS_AERIAL := 1   # auto aéreo
+const OBS_BUS    := 2   # colectivo (techo transitable)
+const OBS_COP    := 3   # policía (1 golpe si es jump+kick o slide)
+
+# Probabilidades fijas por tipo (suman 1.0)
+const OBS_PROB_GROUND: float = 0.52
+const OBS_PROB_AERIAL: float = 0.30
+const OBS_PROB_BUS:    float = 0.10
+# Cop: 0.08 (el resto)
+
+# ── Colectivos (buses) ────────────────────────────────────────────────────────
+const BUS_DATA: Array = [
+	{"cw": 1007.0, "ch": 400.0, "body_h": 320.0},  # bus_01
+	{"cw": 1007.0, "ch": 386.0, "body_h": 309.0},  # bus_02
+	{"cw": 1009.0, "ch": 394.0, "body_h": 315.0},  # bus_03
+]
+const BUS_SCALE:       float = 0.588
+const BUS_FLOOR_Y:     float = 695.0
+const BUS_ROOF_OFFSET: float = 15.0
+
+# ── Policía ───────────────────────────────────────────────────────────────────
+const COP_SCENE := preload("res://scenes/enemies/Cop.tscn")
+const COP_W:     float = 200.0   # ancho aproximado para cálculo de gaps
+
 const CAR_CONTOURS_NEW: Dictionary = {
 	0: [0, 0, 0, 0, 0, 320, 330, 337, 355, 364, 367, 370, 373, 375, 378, 381, 383, 385, 388, 390, 392, 394, 397, 399, 402, 405, 407, 410, 411, 413, 415, 417, 419, 420, 422, 424, 426, 426, 427, 428, 429, 429, 431, 431, 431, 430, 428, 425, 421, 417, 411, 405, 399, 393, 386, 379, 372, 364, 357, 350, 343, 336, 329, 323, 317, 311, 306, 302, 298, 294, 290, 286, 282, 278, 273, 268, 262, 256, 249, 241, 231, 218, 211, 203, 0, 0, 0, 0, 0],
 	1: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 252, 268, 282, 320, 350, 378, 414, 445, 473, 486, 499, 499, 499, 500, 499, 499, 488, 478, 469, 460, 451, 453, 454, 454, 454, 453, 453, 452, 452, 451, 451, 451, 452, 452, 452, 448, 443, 437, 428, 419, 411, 401, 391, 381, 369, 357, 345, 334, 325, 316, 310, 305, 300, 297, 294, 290, 287, 283, 278, 273, 267, 259, 250, 234, 210, 200, 187, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -104,6 +130,10 @@ var _aerial_base_x:   Array = []
 var _aerial_bodies:   Array = []
 var _aerial_phases:   Array = []
 var _aerial_shadows:  Array = []
+var _bus_base_x:  Array = []
+var _bus_bodies:  Array = []
+var _cop_base_x:  Array = []
+var _cop_nodes:   Array = []
 
 func get_placed_x() -> Array:
 	return _base_x
@@ -115,54 +145,100 @@ func _ready() -> void:
 	var sc := car_scale
 	var shadow_tex: Texture2D = load("res://assets/sprites/cars/side_test/car_side_06 - copia.png")
 
+	var bus_textures: Array = []
+	for i in range(1, BUS_DATA.size() + 1):
+		bus_textures.append(load("res://assets/sprites/buses/bus_0%d.png" % i))
+
 	var obstacles := _generate_obstacles()
 	for obs: Dictionary in obstacles:
-		var px        : float = obs.x
-		var local_idx : int   = obs.frame
-		var is_new    : bool  = obs.is_new
-		var tex_path  := "res://assets/sprites/cars/side_chatgpt/car_side_%02d.png" % local_idx \
-		                 if is_new else \
-		                 "res://assets/sprites/cars/side_test/car_side_%02d.png" % local_idx
-		var tex: Texture2D = load(tex_path)
-		if not tex:
-			continue
+		var px: float = obs.x
+		var fi: int   = obs.frame
 
-		var anchor_y := AERIAL_Y if is_new else FLOOR_Y
-		var frame_sc: float = sc * (float(AERIAL_SCALE_MULT.get(local_idx, 1.0)) if is_new else float(GROUND_SCALE_MULT.get(local_idx, 1.0)))
-		var body := StaticBody2D.new()
-		body.position = Vector2(px, anchor_y)
+		match obs.type:
+			OBS_GROUND:
+				var tex: Texture2D = load("res://assets/sprites/cars/side_test/car_side_%02d.png" % fi)
+				if not tex: continue
+				var frame_sc := sc * float(GROUND_SCALE_MULT.get(fi, 1.0))
+				var body := StaticBody2D.new()
+				body.position = Vector2(px, FLOOR_Y)
+				var sp := Sprite2D.new()
+				sp.texture  = tex
+				sp.centered = false
+				sp.scale    = Vector2(frame_sc, frame_sc)
+				sp.position = Vector2(-CAR_CANVAS_W * frame_sc * 0.5, -CAR_CANVAS_H * frame_sc)
+				body.add_child(sp)
+				_add_contour_collision(body, fi, frame_sc)
+				body.add_to_group("car_obstacle")
+				add_child(body)
+				_base_x.append(px)
+				_bodies.append(body)
 
-		var sp := Sprite2D.new()
-		sp.texture  = tex
-		sp.centered = false
-		sp.scale    = Vector2(frame_sc, frame_sc)
-		sp.position = Vector2(-CAR_CANVAS_W * frame_sc * 0.5, -CAR_CANVAS_H * frame_sc)
-		body.add_child(sp)
+			OBS_AERIAL:
+				var tex: Texture2D = load("res://assets/sprites/cars/side_chatgpt/car_side_%02d.png" % fi)
+				if not tex: continue
+				var frame_sc := sc * float(AERIAL_SCALE_MULT.get(fi, 1.0))
+				var body := StaticBody2D.new()
+				body.position = Vector2(px, AERIAL_Y)
+				var sp := Sprite2D.new()
+				sp.texture  = tex
+				sp.centered = false
+				sp.scale    = Vector2(frame_sc, frame_sc)
+				sp.position = Vector2(-CAR_CANVAS_W * frame_sc * 0.5, -CAR_CANVAS_H * frame_sc)
+				body.add_child(sp)
+				_add_contour_collision_new(body, fi, frame_sc)
+				body.collision_layer = 8
+				body.z_as_relative   = false
+				body.z_index         = 4
+				body.add_to_group("car_obstacle")
+				add_child(body)
+				_aerial_base_x.append(px)
+				_aerial_bodies.append(body)
+				_aerial_phases.append(_rng.randf_range(0.0, TAU))
+				if shadow_tex:
+					var sh := Sprite2D.new()
+					sh.texture  = shadow_tex
+					sh.centered = false
+					sh.scale    = Vector2(sc, sc)
+					add_child(sh)
+					_aerial_shadows.append(sh)
 
-		if is_new:
-			_add_contour_collision_new(body, local_idx, frame_sc)
-			body.collision_layer = 8   # layer 4 — solo PP lo choca (mask 9), slide lo ignora (mask 1)
-			body.z_as_relative   = false
-			body.z_index         = 4   # delante del player (z=3)
-			body.add_to_group("car_obstacle")
-			add_child(body)
-			_aerial_base_x.append(px)
-			_aerial_bodies.append(body)
-			_aerial_phases.append(_rng.randf_range(0.0, TAU))
-			# Sombra en el piso (canvas bottom = FLOOR_Y)
-			if shadow_tex:
-				var sh := Sprite2D.new()
-				sh.texture  = shadow_tex
-				sh.centered = false
-				sh.scale    = Vector2(sc, sc)
-				add_child(sh)
-				_aerial_shadows.append(sh)
-		else:
-			_add_contour_collision(body, local_idx, frame_sc)
-			body.add_to_group("car_obstacle")
-			add_child(body)
-			_base_x.append(px)
-			_bodies.append(body)
+			OBS_BUS:
+				var d: Dictionary = BUS_DATA[fi]
+				var cw: float = d.cw
+				var ch: float = d.ch
+				var bh: float = d.body_h
+				var bsc: float = BUS_SCALE
+				var shadow_h: float = ch - bh
+				var tex: Texture2D = bus_textures[fi]
+				if not tex: continue
+				var body := StaticBody2D.new()
+				body.position      = Vector2(px, BUS_FLOOR_Y + shadow_h * bsc)
+				body.collision_layer = 1
+				body.collision_mask  = 0
+				add_child(body)
+				var sp := Sprite2D.new()
+				sp.texture  = tex
+				sp.centered = false
+				sp.scale    = Vector2(bsc, bsc)
+				sp.position = Vector2(-cw * bsc * 0.5, -ch * bsc)
+				body.add_child(sp)
+				var col   := CollisionShape2D.new()
+				var shape := RectangleShape2D.new()
+				shape.size = Vector2(cw * bsc * 0.80, 6.0)
+				col.shape             = shape
+				col.one_way_collision = true
+				col.position          = Vector2(0.0, -(ch - BUS_ROOF_OFFSET) * bsc)
+				body.add_child(col)
+				_bus_base_x.append(px)
+				_bus_bodies.append(body)
+
+			OBS_COP:
+				var cop := COP_SCENE.instantiate() as Node2D
+				cop.position = Vector2(px, 600.0)
+				cop.set("obstacle_mode", true)
+				add_child(cop)
+				_cop_base_x.append(px)
+				_cop_nodes.append(cop)
 
 func _build_car_polygon(raw: Array, sc: float) -> CollisionPolygon2D:
 	var first := -1
@@ -248,16 +324,20 @@ func _process(_delta: float) -> void:
 			sh.global_position.x = _aerial_base_x[i] + offset - CAR_CANVAS_W * sc * 0.5
 			sh.global_position.y = FLOOR_Y - CAR_CANVAS_H * sc
 
-# Devuelve Array de dicts {x, frame, is_new, width}
-# Dificultad progresiva: t = posición normalizada en el nivel (0→1), curva t²
+	for i in range(_bus_bodies.size()):
+		(_bus_bodies[i] as Node2D).global_position.x = _bus_base_x[i] + offset
+
+	for i in range(_cop_nodes.size()):
+		(_cop_nodes[i] as Node2D).global_position.x = _cop_base_x[i] + offset
+
+# Devuelve Array de dicts {x, type, frame, width}
+# Dificultad progresiva: t = posición normalizada (0→1), curva t²
 func _generate_obstacles() -> Array:
 	var result: Array = []
 	var x: float = START_X
-	var total_frames := FRAME_COUNT + FRAME_COUNT_NEW
 	var level_span: float = float(LEVEL_WIDTH) - 800.0 - START_X
 
 	while x < float(LEVEL_WIDTH) - 800.0:
-		# t=0 inicio del nivel, t=1 final; t² aplana el arranque
 		var t: float  = clampf((x - START_X) / level_span, 0.0, 1.0)
 		var tc: float = t * t
 
@@ -280,22 +360,44 @@ func _generate_obstacles() -> Array:
 		for i in range(group_size):
 			if x >= float(LEVEL_WIDTH) - 800.0:
 				break
-			var frame_idx := _rng.randi() % total_frames
-			var is_new    := frame_idx >= FRAME_COUNT
-			var local_idx := frame_idx - FRAME_COUNT if is_new else frame_idx
-			var body_w    := _frame_body_w(local_idx, is_new)
-			result.append({"x": x, "frame": local_idx, "is_new": is_new, "width": body_w})
+
+			# Tipo de obstáculo — fijo, no escala con dificultad
+			var tr := _rng.randf()
+			var obs_type: int
+			if tr < OBS_PROB_GROUND:
+				obs_type = OBS_GROUND
+			elif tr < OBS_PROB_GROUND + OBS_PROB_AERIAL:
+				obs_type = OBS_AERIAL
+			elif tr < OBS_PROB_GROUND + OBS_PROB_AERIAL + OBS_PROB_BUS:
+				obs_type = OBS_BUS
+			else:
+				obs_type = OBS_COP
+
+			var local_idx: int
+			var body_w: float
+			match obs_type:
+				OBS_GROUND:
+					local_idx = _rng.randi() % FRAME_COUNT
+					body_w    = float(GROUND_BODY_W.get(local_idx, 370.0))
+				OBS_AERIAL:
+					local_idx = _rng.randi() % FRAME_COUNT_NEW
+					body_w    = float(AERIAL_BODY_W.get(local_idx, 347.0))
+				OBS_BUS:
+					local_idx = _rng.randi() % BUS_DATA.size()
+					body_w    = float(BUS_DATA[local_idx].cw) * BUS_SCALE
+				OBS_COP:
+					local_idx = 0
+					body_w    = COP_W
+				_:
+					local_idx = 0
+					body_w    = 370.0
+
+			result.append({"x": x, "type": obs_type, "frame": local_idx, "width": body_w})
 			if i < group_size - 1:
 				x += body_w + _rng.randf_range(inner_min, inner_max)
 
-		# Avanzar desde el borde del último auto del grupo + respiro
 		if not result.is_empty():
 			var last: Dictionary = result[-1]
 			x = last.x + last.width + _rng.randf_range(breath_min, breath_max)
 	return result
-
-func _frame_body_w(local_idx: int, is_new: bool) -> float:
-	if is_new:
-		return float(AERIAL_BODY_W.get(local_idx, 347.0))
-	return float(GROUND_BODY_W.get(local_idx, 370.0))
 

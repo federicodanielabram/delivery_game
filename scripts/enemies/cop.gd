@@ -38,6 +38,8 @@ var patrol_origin    := Vector2.ZERO
 var _attack_hit_done := false
 var player: CharacterBody2D = null
 
+var obstacle_mode: bool = false   # true cuando lo spawna el mid layer como obstáculo
+
 var hp_bar_node:   Node2D = null
 var hp_bar_blocks: Array  = []
 var _shadow: Sprite2D = null
@@ -164,6 +166,19 @@ func _refresh_hp_bar() -> void:
 func _physics_process(delta: float) -> void:
 	if state == State.DEAD:
 		velocity = Vector2.ZERO
+		move_and_slide()
+		return
+
+	# En modo obstáculo: parado, sin AI, X controlada externamente por car_mid_layer
+	if obstacle_mode:
+		velocity.x = 0.0
+		if not is_on_floor():
+			velocity.y += GRAVITY * delta
+		else:
+			velocity.y = 0.0
+		if sprite.animation != "idle":
+			sprite.play("idle")
+		move_and_slide()
 		return
 
 	if not is_on_floor():

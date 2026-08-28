@@ -117,12 +117,7 @@ func _ready() -> void:
 	mid_layer.modulate = Color(0.55, 0.50, 0.65)
 	add_child(mid_layer)
 
-	# Capa de colectivos — entre tráfico trasero y fila del medio
-	var bus_layer := Node2D.new()
-	bus_layer.set_script(load("res://scripts/bus_layer.gd"))
-	bus_layer.name = "BusLayer"
-	bus_layer.modulate = Color(0.55, 0.50, 0.65)
-	add_child(bus_layer)
+	# Colectivos y policías integrados en CarMidLayer
 
 	# Cop de prueba (desactivado temporalmente)
 	#_spawn_cop(500)
