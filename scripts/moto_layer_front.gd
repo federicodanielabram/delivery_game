@@ -1,13 +1,13 @@
 extends Node2D
 
 @export var parallax: float = 1.35
-@export var moto_count: int = 14
+@export var moto_count: int = 30
 @export var moto_scale: float = 0.55
 
 const LEVEL_WIDTH: int = 32000
 const FRAME_COUNT: int = 18
-const MIN_DIST_MOTO_MOTO: float = 280.0
-const MIN_DIST_MOTO_CAR: float = 750.0
+const MIN_DIST_MOTO_MOTO: float = 220.0
+const MIN_DIST_MOTO_CAR: float = 400.0
 
 var _base_x: Array = []
 var _sprites: Array = []

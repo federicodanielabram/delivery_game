@@ -1,12 +1,37 @@
 extends Node2D
 
 const THUG_SCENE         := preload("res://scenes/enemies/Thug.tscn")
+const COP_SCENE          := preload("res://scenes/enemies/Cop.tscn")
 const WAITER_SCENE       := preload("res://scenes/enemies/Waiter.tscn")
 const WAITER_DARK_SCENE  := preload("res://scenes/enemies/WaiterDark.tscn")
 const WAITER_LIGHT_SCENE := preload("res://scenes/enemies/WaiterLight.tscn")
 const HUD_SCENE          := preload("res://scenes/HUD.tscn")
 
 const LEVEL_LENGTH := 32000.0
+
+# ── Autos laterales (obstáculos plataforma) ──────────────────────────────────
+# Scale calculado: ancho intermedio entre traseros (195px) y frontales (910px)
+# → target 553px / sprite_w 1364px = 0.4056
+const CAR_SIDE_SCALE   := 0.4056
+const CAR_CANVAS_W     := 1396.0   # canvas normalizado del sprite
+const CAR_CANVAS_H     := 496.0
+const CAR_BODY_W       := 1364.0   # carrocería dentro del canvas
+const CAR_BODY_H       := 464.0
+const CAR_PAD          := 16.0     # padding del canvas
+const CAR_FLOOR_Y      := 730.0    # 50px más abajo que el piso del PP
+const CAR_SIDE_FRAMES  := 1        # cuántos frames tenemos por ahora (test)
+
+const NIGHT_ENEMY := Color(0.52, 0.47, 0.60)
+
+const WAVE_TRIGGER_DIST := 500.0
+const WAVE_COUNT        := 3
+const _WAITER_DEAD      := 4   # State.DEAD en waiter.gd
+
+var _boss_node:      Node2D = null
+var _cam_limit       := 0.0
+var _wave_index      := 0
+var _wave_triggered  := false
+var _wave_enemies:   Array  = []
 
 # Colores de obstáculos
 const COL_PLATFORM := Color(0.15, 0.15, 0.2,  1.0)
@@ -73,11 +98,35 @@ func _ready() -> void:
 	var hud: Node = HUD_SCENE.instantiate()
 	add_child(hud)
 
-	# Pizzeria: edificio frontal final
-	_create_pizzeria(30000.0)
+	#_boss_node = get_node_or_null("Boss")
 
-	# Límite de cámara
+	# Límite de cámara (se calcula después de que BuildingsLayer ponga la pizzeria)
 	_set_camera_limit()
+
+	# Drone desactivado temporalmente
+	var drone_node := get_node_or_null("Drone")
+	if drone_node:
+		drone_node.visible = false
+		drone_node.set_process(false)
+		drone_node.set_physics_process(false)
+
+	# Capa de autos del medio (obstáculos/plataformas)
+	var mid_layer := Node2D.new()
+	mid_layer.set_script(load("res://scripts/car_mid_layer.gd"))
+	mid_layer.name = "CarMidLayer"
+	mid_layer.modulate = Color(0.55, 0.50, 0.65)
+	add_child(mid_layer)
+
+	# Capa de colectivos — entre tráfico trasero y fila del medio
+	var bus_layer := Node2D.new()
+	bus_layer.set_script(load("res://scripts/bus_layer.gd"))
+	bus_layer.name = "BusLayer"
+	bus_layer.modulate = Color(0.55, 0.50, 0.65)
+	add_child(bus_layer)
+
+	# Cop de prueba (desactivado temporalmente)
+	#_spawn_cop(500)
+
 
 	# Mozos (tiran platos) repartidos a lo largo del nivel, antes del boss (~14600)
 	#_spawn_waiter(3000)
@@ -94,8 +143,65 @@ func _set_camera_limit() -> void:
 	var player := get_tree().get_first_node_in_group("player") as Node2D
 	if not player: return
 	var cam := player.get_node_or_null("Camera2D") as Camera2D
-	if cam:
+	if not cam: return
+	var bl := get_node_or_null("BuildingsLayer")
+	if bl:
+		var piz_base: float = bl.get("pizzeria_base_x")
+		const PIZ_W := 2172.0 * (266.0 / 724.0)   # ancho visual de la pizzeria ~798px
+		var half_vp := get_viewport().get_visible_rect().size.x * 0.5 / cam.zoom.x
+		# parallax 1.2: visual_pos = base - 0.2*cam  →  centrar: base + PIZ_W/2 = 1.2*cam
+		var limit := int((piz_base + PIZ_W * 0.5) / 1.2 + half_vp)
+		cam.limit_right = limit
+		_cam_limit = float(limit)
+		_create_right_wall(limit)
+		if _boss_node:
+			_boss_node.position = Vector2(_cam_limit - 550.0, 560.0)
+			_boss_node.visible  = true
+			(_boss_node as Node2D).modulate = NIGHT_ENEMY
+			var drone := get_node_or_null("Drone")
+			if drone:
+				drone.set("retreat_trigger_x", _boss_node.position.x - 300.0)
+		# Farol: oculta los que caen sobre la pizzeria, agrega uno sobre el edificio derecho
+		var sl := get_node_or_null("StreetlampLayer")
+		if sl:
+			var right_building_x := piz_base + PIZ_W - 35.0
+			sl.call("finalize_for_pizzeria", piz_base - 100.0, piz_base + PIZ_W + 100.0, right_building_x)
+	else:
 		cam.limit_right = int(LEVEL_LENGTH)
+		_create_right_wall(int(LEVEL_LENGTH))
+
+func _process(_delta: float) -> void:
+	var player := get_tree().get_first_node_in_group("player") as Node2D
+	if not player or not _boss_node:
+		return
+	if not _wave_triggered:
+		if player.global_position.x >= _boss_node.global_position.x - WAVE_TRIGGER_DIST:
+			_wave_triggered = true
+			_spawn_wave()
+		return
+	if _wave_index >= WAVE_COUNT or _wave_enemies.is_empty():
+		return
+	var all_dead := true
+	for e in _wave_enemies:
+		if is_instance_valid(e) and e.get("state") != _WAITER_DEAD:
+			all_dead = false
+			break
+	if all_dead:
+		_spawn_wave()
+
+func _spawn_wave() -> void:
+	_wave_index += 1
+	_wave_enemies.clear()
+	_wave_enemies.append(_spawn_wave_waiter(_boss_node.global_position.x - 1400.0, 600.0))
+	_wave_enemies.append(_spawn_wave_waiter(_cam_limit - 50.0, 600.0))
+
+func _spawn_wave_waiter(x: float, y: float) -> Node:
+	var scenes := [WAITER_SCENE, WAITER_DARK_SCENE, WAITER_LIGHT_SCENE]
+	var waiter: Node = scenes[randi() % scenes.size()].instantiate()
+	(waiter as Node2D).position = Vector2(x, y)
+	(waiter as Node2D).modulate = NIGHT_ENEMY
+	add_child(waiter)
+	return waiter
 
 func _spawn_waiter(x: float) -> void:
 	var waiter: Node = WAITER_SCENE.instantiate()
@@ -111,6 +217,12 @@ func _spawn_waiter_light(x: float) -> void:
 	var waiter: Node = WAITER_LIGHT_SCENE.instantiate()
 	(waiter as Node2D).position = Vector2(x, 600.0)
 	add_child(waiter)
+
+func _spawn_cop(x: float) -> void:
+	var cop: Node = COP_SCENE.instantiate()
+	(cop as Node2D).position = Vector2(x, 600.0)
+	(cop as Node2D).modulate = NIGHT_ENEMY
+	add_child(cop)
 
 func _spawn_thug(x: float) -> void:
 	var thug: Node = THUG_SCENE.instantiate()
@@ -194,27 +306,49 @@ func _add_tunnel_pillar(x: float, ceil_y: float) -> void:
 	rect.color    = COL_TUNNEL
 	add_child(rect)
 
-# ── Pizzeria (edificio frontal al final del mapa) ───────────────────────────
-func _create_pizzeria(cx: float) -> void:
-	const FLOOR_Y    := 655.0
-	const IMG_W      := 2172.0
-	const IMG_H      := 724.0
-	const TARGET_H   := 380.0          # alto en world-space
-	const SCALE      := TARGET_H / IMG_H
-
-	var tex := load("res://assets/buildings/pizzeria.png") as Texture2D
+# ── Auto lateral (obstáculo/plataforma) ─────────────────────────────────────
+# frame_idx: número de sprite (0-9). El auto es sólido: bloquea lateralmente
+# y tiene superficie superior donde el PP puede pararse (techo y capó).
+func _spawn_side_car(x: float, frame_idx: int) -> void:
+	var sc  := CAR_SIDE_SCALE
+	var tex: Texture2D = load("res://assets/sprites/cars/side_test/car_side_%02d.png" % frame_idx)
 	if not tex:
-		push_error("Pizzeria: no se encontró res://assets/buildings/pizzeria.png")
+		push_warning("car_side_%02d.png no encontrado" % frame_idx)
 		return
 
+	var body := StaticBody2D.new()
+	body.position = Vector2(x, CAR_FLOOR_Y)
+	body.z_index  = 3   # entre trasera (z=2) y delantera (z=4)
+	add_child(body)
+
+	# Sprite: centered=false, bottom del canvas alineado al piso
 	var sp := Sprite2D.new()
-	sp.name     = "Pizzeria"
 	sp.texture  = tex
 	sp.centered = false
-	sp.scale    = Vector2(SCALE, SCALE)
-	sp.position = Vector2(cx - IMG_W * SCALE / 2.0, FLOOR_Y - TARGET_H)
-	sp.z_index  = 0
-	add_child(sp)
+	sp.scale    = Vector2(sc, sc)
+	# En espacio del body: top-left en (-canvas_w*sc/2, -canvas_h*sc)
+	sp.position = Vector2(-CAR_CANVAS_W * sc * 0.5, -CAR_CANVAS_H * sc)
+	body.add_child(sp)
+
+	# Colisión rectangular: cubre toda la carrocería (ruedas → techo)
+	# Centro en y = -(CAR_PAD + CAR_BODY_H/2) * sc  respecto al body (floor)
+	var col  := CollisionShape2D.new()
+	var rect := RectangleShape2D.new()
+	rect.size    = Vector2(CAR_BODY_W * sc, CAR_BODY_H * sc)
+	col.shape    = rect
+	col.position = Vector2(0.0, -(CAR_PAD + CAR_BODY_H * 0.5) * sc)
+	body.add_child(col)
+
+# ── Pared invisible al final del nivel ──────────────────────────────────────
+func _create_right_wall(x: int) -> void:
+	var wall := StaticBody2D.new()
+	wall.position = Vector2(x, 400.0)
+	var col   := CollisionShape2D.new()
+	var shape := RectangleShape2D.new()
+	shape.size = Vector2(32.0, 1200.0)
+	col.shape  = shape
+	wall.add_child(col)
+	add_child(wall)
 
 # ── Puerta (obstacle: golpear con Z) ────────────────────────────────────────
 func _create_door(x: float) -> void:

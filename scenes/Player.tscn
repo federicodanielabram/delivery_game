@@ -19,7 +19,7 @@ position = Vector2(0, -4)
 shape = SubResource("CapsuleShape2D_1")
 
 [node name="Camera2D" type="Camera2D" parent="."]
-offset = Vector2(0, -150)
+offset = Vector2(256, -150)
 limit_left = 0
 limit_right = 2560
 script = ExtResource("2")

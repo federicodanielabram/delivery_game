@@ -1,16 +1,13 @@
 extends Node2D
 
 @export var parallax: float = 1.2
-@export var car_count: int = 22
-@export var car_scale: float = 0.515
+@export var car_count: int = 110
+@export var car_scale: float = 0.137
 
 const LEVEL_WIDTH: int = 32000
-const FRAME_COUNT: int = 9
+const FRAME_COUNT: int = 8
 const FLOOR_TOP_Y: float = 665.0
-const LAMP_SPACING: float = 500.0
-const LAMP_HEAD_OFFSET: float = 140.0
-const LAMP_CLEAR: float = 110.0
-const MIN_DIST_CAR_CAR: float = 200.0
+const MIN_DIST_CAR_CAR: float = 210.0
 const MIN_DIST_CAR_MOTO: float = 130.0
 
 var _base_x: Array = []
@@ -22,13 +19,7 @@ var _textures: Array = []
 func get_placed_x() -> Array:
 	return _base_x
 
-func _near_lamp(x: float) -> bool:
-	var rel := fmod(x - LAMP_HEAD_OFFSET + LAMP_SPACING * 10000.0, LAMP_SPACING)
-	return rel < LAMP_CLEAR or rel > LAMP_SPACING - LAMP_CLEAR
-
 func _conflicts(x: float) -> bool:
-	if _near_lamp(x):
-		return true
 	for mx in _moto_positions:
 		if absf(x - float(mx)) < MIN_DIST_CAR_MOTO:
 			return true
@@ -52,7 +43,7 @@ func _ready() -> void:
 		_moto_positions = moto_layer.call("get_placed_x")
 
 	for i in range(FRAME_COUNT):
-		var path := "res://assets/sprites/cars/frames/frame_%02d.png" % i
+		var path := "res://assets/sprites/cars/side_test/car_side_%02d.png" % i
 		var tex: Texture2D = load(path)
 		_textures.append(tex)
 

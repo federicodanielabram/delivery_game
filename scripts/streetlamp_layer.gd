@@ -9,7 +9,7 @@ extends Node2D
 @export var light_dir_energy: float = 2.2
 @export var light_dir_scale: float = 24.0
 
-const LEVEL_WIDTH: int = 32000
+const LEVEL_WIDTH: int = 35000
 const FLOOR_Y: int = 655
 const MODE_NORMAL  := 0
 const MODE_FLICKER := 1
@@ -20,6 +20,9 @@ var _lamps: Array = []
 var _rng := RandomNumberGenerator.new()
 var _lamp_head_x: float = 0.0
 var _lamp_head_y: float = 0.0
+var _sprite_tex: Texture2D = null
+var _light_tex: GradientTexture2D = null
+var _cone_tex: ImageTexture = null
 
 func _make_light_tex() -> GradientTexture2D:
 	var grad := Gradient.new()
@@ -62,80 +65,89 @@ func _make_cone_tex(tex_size: int, half_angle_deg: float) -> ImageTexture:
 
 func _ready() -> void:
 	_rng.seed = 77
-
-	var sprite_tex: Texture2D = load("res://assets/sprites/streetlamp.png")
-	if not sprite_tex:
+	_sprite_tex = load("res://assets/sprites/streetlamp.png")
+	if not _sprite_tex:
 		return
-
-	var light_tex  := _make_light_tex()
-	var cone_tex   := _make_cone_tex(128, 32.0)
-	var img_h: float = sprite_tex.get_height() * scale_factor
+	_light_tex = _make_light_tex()
+	_cone_tex  = _make_cone_tex(128, 32.0)
+	var img_h: float = _sprite_tex.get_height() * scale_factor
 	_lamp_head_x = 267.0 * scale_factor
 	_lamp_head_y = FLOOR_Y - img_h + 17.0 + 40.0 * scale_factor
 
 	var x: float = 0.0
 	while x < LEVEL_WIDTH:
-		var sp := Sprite2D.new()
-		sp.texture = sprite_tex
-		sp.centered = false
-		sp.scale = Vector2(scale_factor, scale_factor)
-		sp.position = Vector2(x, FLOOR_Y - img_h + 17)
-		sp.modulate = Color(0.40, 0.35, 0.50)
-		add_child(sp)
-		_base_x.append(x)
-
-		var head_pos := Vector2(x + _lamp_head_x, _lamp_head_y)
-
-		# Luz circular — entorno (z 0-2), energía completa
-		var light := PointLight2D.new()
-		light.texture = light_tex
-		light.color = light_color
-		light.energy = light_energy
-		light.texture_scale = light_scale
-		light.range_z_max = 2
-		light.position = head_pos
-		add_child(light)
-
-		# Luz direccional — entorno (z 0-2), energía completa
-		var light_dir := PointLight2D.new()
-		light_dir.texture = cone_tex
-		light_dir.color = light_color
-		light_dir.energy = light_dir_energy
-		light_dir.texture_scale = light_dir_scale
-		light_dir.range_z_max = 2
-		light_dir.position = head_pos
-		add_child(light_dir)
-
-		# Luz para el PP (z 3+), mitad de energía
-		var light_pp := PointLight2D.new()
-		light_pp.texture = light_tex
-		light_pp.color = light_color
-		light_pp.energy = light_energy * 0.5
-		light_pp.texture_scale = light_scale
-		light_pp.range_z_min = 3
-		light_pp.position = head_pos
-		add_child(light_pp)
-
-		var idx := _lamps.size()
-		var mode := MODE_FLICKER if (idx % 3 == 2) else MODE_NORMAL
-
-		if mode == MODE_DEAD:
-			light.enabled = false
-			light_dir.enabled = false
-			light_pp.enabled = false
-
-		_lamps.append({
-			"sp":            sp,
-			"light":         light,
-			"light_dir":     light_dir,
-			"light_pp":      light_pp,
-			"mode":          mode,
-			"sub_state":     0,
-			"timer":         _rng.randf_range(1.0, 8.0),
-			"flicker_timer": 0.0,
-		})
-
+		_add_lamp(x)
 		x += spacing
+
+func _add_lamp(x: float) -> void:
+	var img_h: float = _sprite_tex.get_height() * scale_factor
+
+	var sp := Sprite2D.new()
+	sp.texture  = _sprite_tex
+	sp.centered = false
+	sp.scale    = Vector2(scale_factor, scale_factor)
+	sp.position = Vector2(x, FLOOR_Y - img_h + 17)
+	sp.modulate = Color(0.40, 0.35, 0.50)
+	add_child(sp)
+	_base_x.append(x)
+
+	var head_pos := Vector2(x + _lamp_head_x, _lamp_head_y)
+
+	var light := PointLight2D.new()
+	light.texture       = _light_tex
+	light.color         = light_color
+	light.energy        = light_energy
+	light.texture_scale = light_scale
+	light.range_z_max   = 2
+	light.position      = head_pos
+	add_child(light)
+
+	var light_dir := PointLight2D.new()
+	light_dir.texture       = _cone_tex
+	light_dir.color         = light_color
+	light_dir.energy        = light_dir_energy
+	light_dir.texture_scale = light_dir_scale
+	light_dir.range_z_max   = 2
+	light_dir.position      = head_pos
+	add_child(light_dir)
+
+	var light_pp := PointLight2D.new()
+	light_pp.texture       = _light_tex
+	light_pp.color         = light_color
+	light_pp.energy        = light_energy * 0.5
+	light_pp.texture_scale = light_scale
+	light_pp.range_z_min   = 3
+	light_pp.position      = head_pos
+	add_child(light_pp)
+
+	var mode := MODE_FLICKER if (_lamps.size() % 3 == 2) else MODE_NORMAL
+	if mode == MODE_DEAD:
+		light.enabled     = false
+		light_dir.enabled = false
+		light_pp.enabled  = false
+
+	_lamps.append({
+		"sp":            sp,
+		"light":         light,
+		"light_dir":     light_dir,
+		"light_pp":      light_pp,
+		"mode":          mode,
+		"sub_state":     0,
+		"timer":         _rng.randf_range(1.0, 8.0),
+		"flicker_timer": 0.0,
+	})
+
+# Oculta los faroles sobre la pizzeria y agrega uno sobre el edificio derecho.
+func finalize_for_pizzeria(skip_from: float, skip_to: float, extra_x: float) -> void:
+	for i in range(_lamps.size()):
+		if _base_x[i] >= skip_from and _base_x[i] <= skip_to:
+			var lamp: Dictionary = _lamps[i]
+			lamp["mode"]              = MODE_NORMAL  # evita que _process reactive las luces
+			lamp["sp"].visible        = false
+			lamp["light"].enabled     = false
+			lamp["light_dir"].enabled = false
+			lamp["light_pp"].enabled  = false
+	_add_lamp(extra_x)
 
 func _process(delta: float) -> void:
 	var cam := get_viewport().get_camera_2d()
@@ -147,14 +159,14 @@ func _process(delta: float) -> void:
 		var lamp: Dictionary = _lamps[i]
 		var new_x: float = _base_x[i] + world_offset
 		var head_pos := Vector2(new_x + _lamp_head_x, _lamp_head_y)
-		lamp["sp"].global_position.x = new_x
-		lamp["light"].global_position = head_pos
+		lamp["sp"].global_position.x      = new_x
+		lamp["light"].global_position     = head_pos
 		lamp["light_dir"].global_position = head_pos
-		lamp["light_pp"].global_position = head_pos
+		lamp["light_pp"].global_position  = head_pos
 
-		var light: PointLight2D = lamp["light"]
+		var light: PointLight2D     = lamp["light"]
 		var light_dir: PointLight2D = lamp["light_dir"]
-		var light_pp: PointLight2D = lamp["light_pp"]
+		var light_pp: PointLight2D  = lamp["light_pp"]
 		lamp["timer"] -= delta
 
 		match lamp["mode"]:
@@ -167,14 +179,14 @@ func _process(delta: float) -> void:
 				else:
 					lamp["flicker_timer"] -= delta
 					if lamp["flicker_timer"] <= 0.0:
-						light.enabled = !light.enabled
+						light.enabled     = !light.enabled
 						light_dir.enabled = light.enabled
-						light_pp.enabled = light.enabled
+						light_pp.enabled  = light.enabled
 						lamp["flicker_timer"] = _rng.randf_range(0.03, 0.12)
 					if lamp["timer"] <= 0.0:
-						light.enabled = true
+						light.enabled     = true
 						light_dir.enabled = true
-						light_pp.enabled = true
+						light_pp.enabled  = true
 						lamp["sub_state"] = 0
 						lamp["timer"] = _rng.randf_range(0.5, 3.0)
 
@@ -187,13 +199,13 @@ func _process(delta: float) -> void:
 				else:
 					lamp["flicker_timer"] -= delta
 					if lamp["flicker_timer"] <= 0.0:
-						light.enabled = !light.enabled
+						light.enabled     = !light.enabled
 						light_dir.enabled = light.enabled
-						light_pp.enabled = light.enabled
+						light_pp.enabled  = light.enabled
 						lamp["flicker_timer"] = _rng.randf_range(0.04, 0.15)
 					if lamp["timer"] <= 0.0:
-						light.enabled = false
+						light.enabled     = false
 						light_dir.enabled = false
-						light_pp.enabled = false
+						light_pp.enabled  = false
 						lamp["sub_state"] = 0
 						lamp["timer"] = _rng.randf_range(6.0, 22.0)

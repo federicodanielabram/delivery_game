@@ -1,17 +1,14 @@
 extends Node2D
 
 @export var parallax: float = 1.2
-@export var moto_count: int = 22
+@export var moto_count: int = 110
 @export var moto_scale: float = 0.211
 
 const LEVEL_WIDTH: int = 32000
 const FRAME_COUNT: int = 18
 const FLOOR_TOP_Y: float = 663.0
-const LAMP_SPACING: float = 500.0
-const LAMP_HEAD_OFFSET: float = 140.0
-const LAMP_CLEAR: float = 110.0
-const MIN_DIST_MOTO_MOTO: float = 160.0
-const MIN_DIST_MOTO_CAR: float = 180.0
+const MIN_DIST_MOTO_MOTO: float = 110.0
+const MIN_DIST_MOTO_CAR: float = 110.0
 
 var _base_x: Array = []
 var _sprites: Array = []
@@ -40,13 +37,7 @@ func _scan_texture(tex: Texture2D) -> void:
 				if y > max_y: max_y = y
 	_frame_data.append({ "max_y": max_y, "actual_h": max_y - min_y + 1 })
 
-func _near_lamp(x: float) -> bool:
-	var rel := fmod(x - LAMP_HEAD_OFFSET + LAMP_SPACING * 10000.0, LAMP_SPACING)
-	return rel < LAMP_CLEAR or rel > LAMP_SPACING - LAMP_CLEAR
-
 func _conflicts(x: float) -> bool:
-	if _near_lamp(x):
-		return true
 	for mx in _base_x:
 		if absf(x - float(mx)) < MIN_DIST_MOTO_MOTO:
 			return true

@@ -1,13 +1,13 @@
 extends Node2D
 
 @export var parallax: float = 1.35
-@export var car_count: int = 14
-@export var car_scale: float = 1.056
+@export var car_count: int = 30
+@export var car_scale: float = 0.639
 
 const LEVEL_WIDTH: int = 32000
 const FRAME_COUNT: int = 8
 const ANCHOR_Y: float = 665.0
-const MIN_DIST: float = 1100.0
+const MIN_DIST: float = 960.0
 
 var _base_x: Array = []
 var _sprites: Array = []
@@ -33,7 +33,7 @@ func _ready() -> void:
 	_rng.randomize()
 
 	for i in range(FRAME_COUNT):
-		var path := "res://assets/sprites/cars/frames_front/frame_%02d.png" % i
+		var path := "res://assets/sprites/cars/side_test/car_side_%02d.png" % i
 		var tex: Texture2D = load(path)
 		_textures.append(tex)
 

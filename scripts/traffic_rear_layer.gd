@@ -1,16 +1,16 @@
 extends Node2D
 
 @export var parallax: float = 1.2
-@export var car_count: int = 22
-@export var moto_count: int = 22
+@export var car_count: int = 300
+@export var moto_count: int = 150
 @export var car_scale: float = 0.515
 @export var moto_scale: float = 0.211
-@export var min_edge_gap: float = 35.0
+@export var min_edge_gap: float = 5.0
 
 const LEVEL_WIDTH: int = 32000
 const CAR_FRAME_COUNT: int = 9
 const MOTO_FRAME_COUNT: int = 18
-const FLOOR_TOP_Y: float = 665.0
+const FLOOR_TOP_Y: float = 655.0
 const LAMP_SPACING: float = 500.0
 const LAMP_HEAD_OFFSET: float = 140.0
 const LAMP_CLEAR: float = 110.0

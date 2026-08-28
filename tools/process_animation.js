@@ -1,6 +1,7 @@
 // Uso: node tools/process_animation.js <video> <carpeta_salida> <prefijo> [--ref-folder <carpeta>]
 // --ref-folder: usa el frame 1 de esa animacion como referencia de tamaño del personaje
 // --scale-from-video: escala el frame completo del video al canvas (preserva proporciones del video, sin recortar bbox)
+// --magenta: usa chroma key magenta (0xFF00FF) en vez del verde por defecto
 
 const { Jimp } = require('jimp');
 const { execSync } = require('child_process');
@@ -14,6 +15,7 @@ let MAX_CHAR_W = 180;
 let MAX_CHAR_H = 160;
 let FOOT_Y     = 192;
 let ALPHA_CUT  = 128;   // umbral del hard-cut de alpha; subirlo elimina motion-blur/estelas
+let CHROMA_MODE = 'green';  // 'green' | 'magenta'
 
 async function charBbox(img) {
   let minX = 99999, maxX = 0, minY = 99999, maxY = 0;
@@ -37,19 +39,35 @@ function _cleanEdges(img) {
     const r = data[idx];
     const g = data[idx + 1];
     const b = data[idx + 2];
-    // Pixel con tinte verde y semi-transparente → green spill de borde, eliminar
-    const greenSpill = g - Math.max(r, b);
-    if (a < 240 && greenSpill > 10) {
-      data[idx + 3] = 0;
-      continue;
-    }
-    // Hard cut: o totalmente opaco o totalmente transparente
-    data[idx + 3] = a < ALPHA_CUT ? 0 : 255;
-    // Despill: el personaje no tiene ningun verde, asi que cualquier pixel que
-    // conservamos con verde dominante (motion blur teñida de verde) se recolorea
-    // bajando el canal verde al maximo de r y b → gris/negro, matcheando la ropa.
-    if (data[idx + 3] === 255 && greenSpill > 4) {
-      data[idx + 1] = Math.max(r, b);
+    if (CHROMA_MODE === 'magenta') {
+      // Magenta spill: R y B altos, G bajo
+      const magentaSpill = Math.min(r, b) - g;
+      if (a < 240 && magentaSpill > 10) {
+        data[idx + 3] = 0;
+        continue;
+      }
+      data[idx + 3] = a < ALPHA_CUT ? 0 : 255;
+      if (data[idx + 3] === 255 && magentaSpill > 4) {
+        // Despill: bajar R y B al nivel de G para neutralizar el tinte magenta
+        const cap = g + Math.round(magentaSpill * 0.3);
+        data[idx]     = Math.min(r, cap);
+        data[idx + 2] = Math.min(b, cap);
+      }
+    } else {
+      // Pixel con tinte verde y semi-transparente → green spill de borde, eliminar
+      const greenSpill = g - Math.max(r, b);
+      if (a < 240 && greenSpill > 10) {
+        data[idx + 3] = 0;
+        continue;
+      }
+      // Hard cut: o totalmente opaco o totalmente transparente
+      data[idx + 3] = a < ALPHA_CUT ? 0 : 255;
+      // Despill: el personaje no tiene ningun verde, asi que cualquier pixel que
+      // conservamos con verde dominante (motion blur teñida de verde) se recolorea
+      // bajando el canal verde al maximo de r y b → gris/negro, matcheando la ropa.
+      if (data[idx + 3] === 255 && greenSpill > 4) {
+        data[idx + 1] = Math.max(r, b);
+      }
     }
   }
 }
@@ -60,6 +78,11 @@ async function main() {
   if (!videoPath || !outputFolder || !prefix) {
     console.log('Uso: node tools/process_animation.js <video> <carpeta_salida> <prefijo> [--ref-folder <carpeta>]');
     process.exit(1);
+  }
+
+  if (process.argv.includes('--magenta')) {
+    CHROMA_MODE = 'magenta';
+    console.log('Chroma mode: magenta (0xFF00FF)');
   }
 
   const alphaCutIdx = process.argv.indexOf('--alpha-cut');
@@ -124,7 +147,8 @@ async function main() {
     const sat = saturation !== null ? saturation : 1;
     vfFilters.push(`eq=brightness=${br}:saturation=${sat}`);
   }
-  vfFilters.push(`colorkey=0x00FF00:0.3:0.1`);
+  const chromaColor = CHROMA_MODE === 'magenta' ? '0xFF00FF' : '0x00FF00';
+  vfFilters.push(`colorkey=${chromaColor}:0.3:0.1`);
   if (killBright !== null) {
     // tolerancia ancha para keyear toda la banda brillante (difuso + núcleo blanco sólido)
     vfFilters.push(`lumakey=threshold=${killBright}:tolerance=0.35`);
@@ -255,11 +279,12 @@ async function main() {
   const dstH = Math.round(srcH * scale);
   const offY = FOOT_Y - dstH;
 
-  // Alinear centro X del personaje con la referencia (si hay ref-folder)
+  // Alinear centro X del personaje con la referencia (si hay ref-folder y no se pasa --no-align-x)
+  const noAlignX = process.argv.includes('--no-align-x');
   let offX;
-  if (refCenterX !== null && frame1BboxInSrc !== null) {
+  if (refCenterX !== null && frame1BboxInSrc !== null && !noAlignX) {
     const f1CenterXInSrc = (frame1BboxInSrc.minX + frame1BboxInSrc.maxX) / 2;
-    const f1CenterXScaled = (f1CenterXInSrc - minX) * scale;  // posicion del centro en el recorte escalado
+    const f1CenterXScaled = (f1CenterXInSrc - minX) * scale;
     offX = Math.round(refCenterX - f1CenterXScaled);
     console.log(`Alineacion X: f1 center src=${f1CenterXInSrc.toFixed(1)}, scaled=${f1CenterXScaled.toFixed(1)}, offX=${offX}`);
   } else {
