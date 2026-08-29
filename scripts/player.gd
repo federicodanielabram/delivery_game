@@ -1120,14 +1120,6 @@ func _handle_air_kicking(delta: float) -> void:
 			state = State.RUN
 			return
 		velocity.x = 0.0   # aterrizó sin input: frena ya y hace el recovery en el lugar → idle
-	else:
-		# En el aire: dive con control. Manteniendo adelante = todo el envión heredado;
-		# soltando adelante = mitad de velocidad (para acortar el alcance).
-		var input_dir := Input.get_axis("ui_left", "ui_right")
-		var holding_fwd := input_dir != 0.0 and (input_dir > 0.0) == facing_right
-		var dive_speed: float = air_kick_speed if holding_fwd else air_kick_speed * 0.5
-		velocity.x = (1.0 if facing_right else -1.0) * dive_speed
-
 	# Golpe: al llegar a la pierna extendida sigue chequeando enemigos hasta conectar.
 	if not air_kick_connected and air_kick_frame_index >= AIR_KICK_IMPACT:
 		if _try_hit_enemies_kb(2, AIR_KICK_KB, FLYING_KICK_RANGE):
@@ -1152,12 +1144,18 @@ func _handle_air_kicking(delta: float) -> void:
 	if step:
 		air_kick_frame_index = mini(air_kick_frame_index + 1, cap)
 
-	# Terminó la secuencia en el piso → idle (acá termina el desplazamiento).
+	# Terminó la secuencia en el piso → derivar estado de la velocidad heredada del salto.
 	if grounded and air_kick_frame_index >= last:
-		velocity.x = 0.0
-		idle_frame_index = 0
-		idle_frame_timer = 0.0
-		state = State.IDLE
+		var idir := Input.get_axis("ui_left", "ui_right")
+		if idir != 0.0 or absf(velocity.x) > 50.0:
+			run_frame_index = 0
+			run_frame_timer = 0.0
+			state = State.RUN
+		else:
+			velocity.x       = 0.0
+			idle_frame_index = 0
+			idle_frame_timer = 0.0
+			state = State.IDLE
 
 func _handle_crouch_attacking(delta: float) -> void:
 	velocity.x   = move_toward(velocity.x, 0.0, FRICTION * delta)
