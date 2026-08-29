@@ -977,7 +977,7 @@ func _handle_air(delta: float) -> void:
 		air_kick_frame_index = 0
 		air_kick_frame_timer = 0.0
 		air_kick_connected   = false
-		air_kick_speed       = maxf(AIR_KICK_FORWARD, absf(velocity.x))  # hereda el envión de entrada
+		air_kick_speed       = 0.0   # sin impulso horizontal: cae vertical sobre el enemigo
 		state                = State.AIR_KICKING
 		return
 
