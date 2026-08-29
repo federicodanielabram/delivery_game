@@ -296,6 +296,8 @@ func take_damage(amount: int, from_right: bool, kb: float = 0.0) -> void:
 	knockback.x = kb * (-1.0 if from_right else 1.0)
 	_refresh_hp_bar()
 	if hp <= 0:
+		if obstacle_mode:
+			collision.disabled = true   # instantáneo: el PP pasa sin bloquearse
 		_die()
 	else:
 		walk_phase = WalkPhase.IDLE

@@ -218,7 +218,8 @@ const SLIDE_HIT_END     := 49    # último frame que barre (fin del deslizamient
 const SLIDE_END_FRAME   := 73    # slide_074: último frame que se reproduce (75+ deshabilitados) → empalma con RUN
 const SLIDE_CROUCHWALK_FRAME := 60 # slide_061: si encadenás a caminar agachado, corta acá sin terminar de pararse
 const SLIDE_HIT_KB      := 0.0   # 0 = enemigo plantado (consistente con el combo)
-const SLIDE_RANGE       := 96.0  # alcance de la barrida
+const SLIDE_RANGE       := 96.0  # alcance de la barrida (enemigos normales)
+const SLIDE_RANGE_COP   := 280.0 # alcance ampliado para cops en obstacle_mode: hit registra antes del contacto físico
 var tex_slide_frames: Array[Texture2D] = []
 var slide_frame_index := 0
 var slide_frame_timer := 0.0
@@ -1294,7 +1295,8 @@ func _slide_sweep() -> void:
 		if slide_hit_ids.has(id): continue
 		var dx: float = e.global_position.x - global_position.x
 		var dy: float = abs(e.global_position.y - global_position.y)
-		if abs(dx) < SLIDE_RANGE and dy < HIT_RANGE_Y and (dx > 0.0) == facing_right:
+		var hit_range := SLIDE_RANGE_COP if e.get("obstacle_mode") else SLIDE_RANGE
+		if abs(dx) < hit_range and dy < HIT_RANGE_Y and (dx > 0.0) == facing_right:
 			if e.has_method("take_damage"):
 				e.call("take_damage", 1, dx < 0.0, SLIDE_HIT_KB)
 				slide_hit_ids[id] = true
