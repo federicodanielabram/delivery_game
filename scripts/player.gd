@@ -1216,6 +1216,10 @@ func _handle_slide(delta: float) -> void:
 			slide_frame_timer -= 1.0 / sfps
 			slide_frame_index += 1
 
+	# Barrida activa mientras el jugador se desliza por el piso (frames START→HIT_END)
+	if slide_frame_index >= SLIDE_START_FRAME and slide_frame_index <= SLIDE_HIT_END:
+		_slide_sweep()
+
 	# Encadena directo a caminar agachado: si venís apretando ↓ + dirección no hace falta
 	# terminar de pararse, cortá en SLIDE_CROUCHWALK_FRAME (slide_062) y pasá a crouch-walk.
 	# Excepción: si el slide vino de RUN, soltar ↓ encadena directo a RUN.
