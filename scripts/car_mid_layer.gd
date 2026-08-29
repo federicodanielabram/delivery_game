@@ -92,10 +92,10 @@ const OBS_BUS    := 2   # colectivo (techo transitable)
 const OBS_COP    := 3   # policía (1 golpe si es jump+kick o slide)
 
 # Probabilidades fijas por tipo (suman 1.0)
-const OBS_PROB_GROUND: float = 0.52
-const OBS_PROB_AERIAL: float = 0.30
-const OBS_PROB_BUS:    float = 0.10
-# Cop: 0.08 (el resto)
+const OBS_PROB_GROUND: float = 0.44
+const OBS_PROB_AERIAL: float = 0.28
+const OBS_PROB_BUS:    float = 0.08
+# Cop: 0.20 (el resto)
 
 # ── Colectivos (buses) ────────────────────────────────────────────────────────
 const BUS_DATA: Array = [
@@ -236,6 +236,7 @@ func _ready() -> void:
 				var cop := COP_SCENE.instantiate() as Node2D
 				cop.position = Vector2(px, 600.0)
 				cop.set("obstacle_mode", true)
+				cop.set("hp", 1)
 				add_child(cop)
 				_cop_base_x.append(px)
 				_cop_nodes.append(cop)
