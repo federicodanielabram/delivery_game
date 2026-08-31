@@ -6,8 +6,9 @@ const ACCELERATION := 2400.0
 const FRICTION     := 1200.0
 const JUMP_FORCE          := -531.0
 const RUN_JUMP_FORCE      := -531.0
+const JUMP_SPRITE_Y_OFFSET := 55.0   # bajá el sprite en jump para alinear pies con la caja
 const RUN_JUMP_SPEED      := 828.0   # velocidad horizontal del salto desde run (más envión que correr)
-const IDLE_JUMP_AIR_SPEED := 420.0   # salto desde idle: velocidad al presionar dirección en el aire (casi el doble del walk)
+const IDLE_JUMP_AIR_SPEED := 228.0   # salto desde idle: 60% de MAX_SPEED, movimiento lateral leve
 const AIR_BRAKE           := 1200.0  # en el aire, presionar la dirección inversa frena fuerte (en vez de darse vuelta)
 const JUMP_SQUAT_DUR      := 0.133
 const RUN_JUMP_SQUAT_DUR  := 2.0 / 24.0
@@ -16,7 +17,7 @@ const ROLL_SPEED   := 160.0
 const ROLL_DIST    := 48.0
 const ROLL_PAUSE   := 0.35
 
-const NEAR_FLOOR_DIST  := 90.0   # px — caída tan corta que no vale mostrar animación de caída
+const NEAR_FLOOR_DIST  := 130.0  # px — caída tan corta que no vale mostrar animación de caída
 
 const NITRO_CHARGE_DUR := 7.0
 const NITRO_ACTIVE_DUR := 2.0
@@ -57,7 +58,7 @@ const DEATH_FADE_DUR := 1.5
 const HIT_RANGE_X   := 112.0  # alcance horizontal del golpe
 const HIT_RANGE_Y   := 52.0   # tolerancia vertical
 
-enum State      { IDLE, WALK, RUN, STOP, RUN_JUMP, JUMP_SQUAT, JUMP, FALL, LAND, JUMP_TO_CROUCH, CROUCH, CROUCH_WALK, STAND, ROLL, ATTACKING, AIR_ATTACKING, CROUCH_ATTACKING, AIR_KICKING, SLIDE, RUN_PUNCH, DEAD }
+enum State      { IDLE, WALK, RUN, STOP, RUN_JUMP, JUMP_SQUAT, JUMP, FALL, LAND, JUMP_TO_CROUCH, CROUCH, CROUCH_WALK, STAND, ROLL, ATTACKING, AIR_ATTACKING, CROUCH_ATTACKING, AIR_KICKING, SLIDE, RUN_PUNCH, DEAD, DOUBLE_JUMP }
 enum AttackType { JAB, HOOK, UPPERCUT, SWEEP, KICK, CROUCH_KICK, AIR_PUNCH, AIR_DOWN_KICK, THROW, FLYING_KICK }
 
 var state          := State.IDLE
@@ -85,7 +86,10 @@ var nitro_timer  := 0.0
 
 var _under_car_t    := 0.0
 var _last_on_aerial := false
-var _aerial_drop    := false
+var _aerial_drop              := false
+var _aerial_z_hold            := 0
+var _last_surface_ground_car  := false
+var _fall_from_run            := false
 
 @onready var sprite:    Sprite2D         = $Sprite2D
 @onready var collision: CollisionShape2D = $CollisionShape2D
@@ -204,6 +208,15 @@ var jump_from_walk   := false
 var jump_from_idle   := false
 const JUMP_FPS := 24.0
 
+const DOUBLE_JUMP_FPS        := 48.0
+const DOUBLE_JUMP_FRAMES     := 73
+const DOUBLE_JUMP_LAST_FRAME := 45   # índice 45 = frame 46; último frame de la vuelta
+const DOUBLE_JUMP_FORCE      := -531.0
+var tex_double_jump_frames: Array[Texture2D] = []
+var double_jump_frame_index  := 0
+var double_jump_frame_timer  := 0.0
+var _double_jump_used        := false
+
 # ── Slide (pop-up slide de béisbol) ──────────────────────────────────────────
 # Se dispara desde RUN + agacharse + dirección. El pj se tira, se desliza con
 # los pies adelante barriendo enemigos (los atraviesa, hitbox baja) y se levanta
@@ -256,8 +269,8 @@ var run_punch_used        := false
 func _ready() -> void:
 	add_to_group("player")
 	z_index = 3
-	floor_max_angle  = deg_to_rad(20.0)  # solo superficies casi planas cuentan como piso
-	floor_snap_length = 0.0              # sin snap a rampas: si no hay piso, cae
+	floor_max_angle  = deg_to_rad(35.0)  # acepta pendientes del contorno de autos como piso
+	floor_snap_length = 24.0             # suaviza vértices del contorno en ambas direcciones
 	_cam_base_offset = camera.offset
 	tex_attack = load("res://assets/sprites/player/player_punch.png")
 	for i in range(1, JAB_FRAMES + 1):
@@ -286,6 +299,8 @@ func _ready() -> void:
 		tex_run_jump_frames.append(load("res://assets/sprites/player/run_jump/run_jump__%03d.png" % i))
 	for i in range(1, 38):
 		tex_jump_frames.append(load("res://assets/sprites/player/jump/jump__%03d.png" % i))
+	for i in range(1, DOUBLE_JUMP_FRAMES + 1):
+		tex_double_jump_frames.append(load("res://assets/sprites/player/double_jump_final/double_jump__%03d.png" % i))
 	for i in range(1, 13):
 		tex_jump_to_crouch_frames.append(load("res://assets/sprites/player/jump_to_crouch/jump_to_crouch___%03d.png" % i))
 	for i in range(3, 10):
@@ -345,6 +360,7 @@ func _physics_process(delta: float) -> void:
 		State.STAND:             _handle_stand(delta)
 		State.ROLL:              _handle_roll(delta)
 		State.JUMP, State.FALL:  _handle_air(delta)
+		State.DOUBLE_JUMP:       _handle_double_jump(delta)
 		State.JUMP_TO_CROUCH:    _handle_jump_to_crouch(delta)
 		State.LAND:              _handle_land(delta)
 		State.ATTACKING:         _handle_attacking(delta)
@@ -362,8 +378,26 @@ func _physics_process(delta: float) -> void:
 	knockback_vel = move_toward(knockback_vel, 0.0, 520.0 * delta)
 	_update_shake(delta)
 	move_and_slide()
+
+	# Trackear superficie — después de move_and_slide() para tener colisiones actualizadas
+	if is_on_floor():
+		_last_surface_ground_car = false
+		for i in get_slide_collision_count():
+			var col := get_slide_collision(i)
+			var collider := col.get_collider() as CollisionObject2D
+			if collider and collider.is_in_group("car_obstacle") and collider.collision_layer == 1:
+				_last_surface_ground_car = true
+				break
+	# Bloqueo global: si entró en FALL justo al salir de un auto del piso, cancelarlo
+	if state == State.FALL and _last_surface_ground_car:
+		state = State.RUN if abs(velocity.x) > 10.0 else State.IDLE
+
 	_last_on_aerial = _is_on_aerial_car()
-	z_index = 5 if _last_on_aerial else 3
+	if _last_on_aerial:
+		_aerial_z_hold = 6
+	elif _aerial_z_hold > 0:
+		_aerial_z_hold -= 1
+	z_index = 5 if (_last_on_aerial or _aerial_z_hold > 0) else 3
 
 func _apply_gravity(delta: float) -> void:
 	if state == State.DEAD: return
@@ -422,6 +456,7 @@ func _tick_timers(delta: float) -> void:
 		if stand_frame_timer >= 1.0 / fps:
 			stand_frame_timer -= 1.0 / fps
 			stand_frame_index = mini(stand_frame_index + 1, tex_stand_frames.size() - 1)
+
 	if state in [State.JUMP_SQUAT, State.JUMP, State.FALL, State.LAND]:
 		var ducking_in_air := Input.is_action_pressed("ui_down") and state in [State.JUMP, State.FALL]
 		var freeze_at_peak := state in [State.JUMP, State.FALL] and (
@@ -588,10 +623,14 @@ func _handle_ground(delta: float) -> void:
 	# Si el piso desapareció (borde de auto aéreo) → caída libre, sin acciones hasta aterrizar.
 	if not is_on_floor():
 		if not _aerial_drop and not _floor_nearby(NEAR_FLOOR_DIST):
-			jump_from_run  = false
-			jump_from_walk = false
-			jump_from_idle = false
-			state = State.FALL
+			if not _last_surface_ground_car:
+				_fall_from_run = (state == State.RUN)
+				jump_from_run  = false
+				jump_from_walk = false
+				jump_from_idle = false
+				if _fall_from_run:
+					velocity.y = abs(velocity.x)
+				state = State.FALL
 		return
 
 	if nitro_active and state == State.RUN:
@@ -608,22 +647,23 @@ func _handle_ground(delta: float) -> void:
 			_try_hit_enemies(1)
 			return
 
-		var dir := Input.get_axis("ui_left", "ui_right")
-		if dir != 0.0 and state == State.RUN and not slide_no_retrigger:
-			_start_slide(dir)
-		elif dir != 0.0:
-			facing_right            = dir > 0.0
-			sprite.flip_h           = not facing_right
-			crouch_walk_frame_index = 0
-			crouch_walk_frame_timer = 0.0
-			state                   = State.CROUCH_WALK
-		else:
-			velocity.x = move_toward(velocity.x, 0.0, FRICTION * delta)
-			if state != State.CROUCH:
-				crouch_frame_index = 0
-				crouch_frame_timer = 0.0
-				crouch_fast        = false
-			state = State.CROUCH
+		if not slide_no_retrigger:
+			var dir := Input.get_axis("ui_left", "ui_right")
+			if dir != 0.0 and state == State.RUN:
+				_start_slide(dir)
+			elif dir != 0.0:
+				facing_right            = dir > 0.0
+				sprite.flip_h           = not facing_right
+				crouch_walk_frame_index = 0
+				crouch_walk_frame_timer = 0.0
+				state                   = State.CROUCH_WALK
+			else:
+				velocity.x = move_toward(velocity.x, 0.0, FRICTION * delta)
+				if state != State.CROUCH:
+					crouch_frame_index = 0
+					crouch_frame_timer = 0.0
+					crouch_fast        = false
+				state = State.CROUCH
 		return
 
 	if Input.is_action_just_pressed("throw"):
@@ -632,13 +672,14 @@ func _handle_ground(delta: float) -> void:
 
 	if Input.is_action_just_pressed("ui_up"):
 		# Idle salta igual que walk: instantaneo, sin jump_squat
-		jump_frame_index = 3
-		jump_frame_timer = 0.0
-		jump_from_run    = true
-		jump_from_walk   = state != State.RUN   # WALK e IDLE = salto tipo walk; RUN = corrida
-		jump_from_idle   = state == State.IDLE  # idle: más control de aire al presionar dirección
-		velocity.y       = RUN_JUMP_FORCE
-		state            = State.JUMP
+		jump_frame_index  = 3
+		jump_frame_timer  = 0.0
+		jump_from_run     = true
+		jump_from_walk    = state != State.RUN
+		jump_from_idle    = state == State.IDLE
+		_double_jump_used = false
+		velocity.y        = RUN_JUMP_FORCE
+		state             = State.JUMP
 		return
 
 	if state != State.RUN and combo_cooldown_timer <= 0.0 and Input.is_action_just_pressed("attack"):
@@ -952,7 +993,7 @@ func _handle_roll(delta: float) -> void:
 # ── Aire ─────────────────────────────────────────────────────────────────────
 
 func _handle_air(delta: float) -> void:
-	if jump_frame_index < 8 and not jump_from_run:
+	if jump_frame_index < 8 and not jump_from_run and not jump_from_idle:
 		velocity.x = 0.0
 		return
 	var dir := Input.get_axis("ui_left", "ui_right")
@@ -967,12 +1008,21 @@ func _handle_air(delta: float) -> void:
 		if (dir > 0.0) == facing_right:
 			# Hacia adelante (la dirección del salto): acelera. No gira el sprite en el aire;
 			# la imagen se da vuelta recién al cambiar de animación (al aterrizar a idle/run).
-			velocity.x = dir * air_max
+			velocity.x = move_toward(velocity.x, dir * air_max, AIR_BRAKE * delta)
 		else:
 			# Dirección inversa: frena drásticamente hacia 0, sin desplazarse para atrás.
 			velocity.x = move_toward(velocity.x, 0.0, AIR_BRAKE * delta)
 	else:
-		velocity.x = move_toward(velocity.x, 0.0, FRICTION * delta * 0.3)
+		if not _fall_from_run:
+			velocity.x = move_toward(velocity.x, 0.0, FRICTION * delta * 0.3)
+
+	if Input.is_action_just_pressed("ui_up") and not _double_jump_used:
+		_double_jump_used        = true
+		double_jump_frame_index  = 22
+		double_jump_frame_timer  = 0.0
+		velocity.y               = DOUBLE_JUMP_FORCE
+		state                    = State.DOUBLE_JUMP
+		return
 
 	if Input.is_action_just_pressed("attack"):
 		air_kick_frame_index = 0
@@ -1003,6 +1053,7 @@ func _handle_air(delta: float) -> void:
 				crouch_fast        = true
 				state              = State.CROUCH
 		elif jump_from_run:
+			_fall_from_run   = false
 			jump_frame_index = 23
 			jump_frame_timer = 0.0
 			state            = State.LAND
@@ -1011,16 +1062,40 @@ func _handle_air(delta: float) -> void:
 			if land_dir != 0.0:
 				facing_right    = land_dir > 0.0
 				sprite.flip_h   = not facing_right
-				velocity.x      = land_dir * MAX_SPEED
+				if not _fall_from_run:
+					velocity.x  = land_dir * MAX_SPEED
+				_fall_from_run  = false
 				run_frame_index = 0
 				run_frame_timer = 0.0
 				state           = State.RUN
 			else:
+				_fall_from_run   = false
 				jump_frame_index = 33
 				jump_frame_timer = 0.0
 				state = State.LAND
 	elif velocity.y > 0.0:
 		state = State.FALL
+
+func _handle_double_jump(delta: float) -> void:
+	# Avanzar frames hasta el último de la vuelta
+	if tex_double_jump_frames.size() > 0:
+		double_jump_frame_timer += delta
+		if double_jump_frame_timer >= 1.0 / DOUBLE_JUMP_FPS:
+			double_jump_frame_timer -= 1.0 / DOUBLE_JUMP_FPS
+			double_jump_frame_index = mini(double_jump_frame_index + 1, DOUBLE_JUMP_LAST_FRAME)
+
+	var dir := Input.get_axis("ui_left", "ui_right")
+	if dir != 0.0:
+		velocity.x = move_toward(velocity.x, dir * MAX_SPEED, 800.0 * delta)
+	else:
+		velocity.x = move_toward(velocity.x, 0.0, FRICTION * delta * 0.3)
+
+	# Al terminar la vuelta, pasar al frame congelado del jump normal → caída idéntica
+	if double_jump_frame_index >= DOUBLE_JUMP_LAST_FRAME:
+		jump_from_run    = false
+		jump_frame_index = 20
+		jump_frame_timer = 0.0
+		state            = State.FALL
 
 # ── Sistema de combos ─────────────────────────────────────────────────────────
 
@@ -1122,7 +1197,19 @@ func _handle_air_kicking(delta: float) -> void:
 		velocity.x = 0.0   # aterrizó sin input: frena ya y hace el recovery en el lugar → idle
 	# Golpe: al llegar a la pierna extendida sigue chequeando enemigos hasta conectar.
 	if not air_kick_connected and air_kick_frame_index >= AIR_KICK_IMPACT:
-		if _try_hit_enemies_kb(2, AIR_KICK_KB, FLYING_KICK_RANGE):
+		var hit := false
+		for _ae in get_tree().get_nodes_in_group("enemy"):
+			var e := _ae as Node2D
+			if not e: continue
+			var dx: float = e.global_position.x - global_position.x
+			var dy: float = abs(e.global_position.y - global_position.y)
+			if abs(dx) < FLYING_KICK_RANGE and dy < HIT_RANGE_Y and (dx > 0.0) == facing_right:
+				if e.has_method("take_weakness_damage"):
+					e.call("take_weakness_damage", dx < 0.0)
+				elif e.has_method("take_damage"):
+					e.call("take_damage", 2, dx < 0.0, AIR_KICK_KB)
+				hit = true
+		if hit:
 			air_kick_connected = true
 			_do_hitstop(HITSTOP_DUR)
 			shake_amount = SHAKE_AMOUNT
@@ -1225,16 +1312,17 @@ func _handle_slide(delta: float) -> void:
 	if slide_frame_index >= SLIDE_CROUCHWALK_FRAME and Input.is_action_pressed("ui_down"):
 		var cw_dir := Input.get_axis("ui_left", "ui_right")
 		if cw_dir != 0.0:
-			facing_right  = cw_dir > 0.0
-			sprite.flip_h = not facing_right
-			if slide_from_run:
-				slide_no_retrigger = true
-				state              = State.RUN
-			else:
-				crouch_walk_frame_index = 0
-				crouch_walk_frame_timer = 0.0
-				state                   = State.CROUCH_WALK
-			return
+			facing_right       = cw_dir > 0.0
+			sprite.flip_h      = not facing_right
+			slide_no_retrigger = true
+			state              = State.RUN
+		else:
+			velocity.x         = 0.0
+			crouch_fast        = false
+			crouch_frame_index = tex_crouch_frames.size() - 1
+			crouch_frame_timer = 0.0
+			state              = State.CROUCH
+		return
 
 	# Si la animación terminó pero sigue bajo un auto aéreo, congela en el hold frame.
 	if slide_frame_index >= SLIDE_END_FRAME and _is_under_aerial_car():
@@ -1246,43 +1334,32 @@ func _handle_slide(delta: float) -> void:
 	if slide_frame_index >= SLIDE_END_FRAME:
 		var dir := Input.get_axis("ui_left", "ui_right")
 		if slide_from_run:
-			# Siempre vuelve a RUN; si ↓ sigue apretado bloquea el re-disparo.
 			if dir != 0.0:
-				facing_right  = dir > 0.0
-				sprite.flip_h = not facing_right
-			slide_no_retrigger = true
-			state              = State.RUN
-		elif Input.is_action_pressed("ui_down"):
-			if dir != 0.0:
-				facing_right            = dir > 0.0
-				sprite.flip_h           = not facing_right
-				crouch_walk_frame_index = 0
-				crouch_walk_frame_timer = 0.0
-				state                   = State.CROUCH_WALK
+				facing_right       = dir > 0.0
+				sprite.flip_h      = not facing_right
+				slide_no_retrigger = true
+				state              = State.RUN
 			else:
+				# Soltó la dirección a mitad del slide → queda agachado
 				velocity.x         = 0.0
 				crouch_fast        = false
 				crouch_frame_index = tex_crouch_frames.size() - 1
 				crouch_frame_timer = 0.0
 				state              = State.CROUCH
 		elif dir != 0.0:
-			facing_right  = dir > 0.0
-			sprite.flip_h = not facing_right
-			if Input.is_key_pressed(KEY_SHIFT):
-				walk_frame_index = 0
-				walk_frame_timer = 0.0
-				velocity.x       = dir * (MAX_SPEED * 0.3)
-				state            = State.WALK
-			else:
-				run_frame_index = 0
-				run_frame_timer = 0.0
-				velocity.x      = dir * MAX_SPEED
-				state           = State.RUN
+			facing_right       = dir > 0.0
+			sprite.flip_h      = not facing_right
+			slide_no_retrigger = true
+			run_frame_index    = 0
+			run_frame_timer    = 0.0
+			velocity.x         = dir * MAX_SPEED
+			state              = State.RUN
 		else:
-			stop_frame_index = 0
-			stop_frame_timer = 0.0
-			stop_from_walk   = false
-			state            = State.STOP
+			slide_no_retrigger = true
+			stop_frame_index   = 0
+			stop_frame_timer   = 0.0
+			stop_from_walk     = false
+			state              = State.STOP
 
 # Barre enemigos a su paso: cada enemigo recibe el golpe una sola vez.
 func _slide_sweep() -> void:
@@ -1295,9 +1372,11 @@ func _slide_sweep() -> void:
 		var dy: float = abs(e.global_position.y - global_position.y)
 		var hit_range := SLIDE_RANGE_COP if e.get("obstacle_mode") else SLIDE_RANGE
 		if abs(dx) < hit_range and dy < HIT_RANGE_Y and (dx > 0.0) == facing_right:
-			if e.has_method("take_damage"):
+			if e.has_method("take_weakness_damage"):
+				e.call("take_weakness_damage", dx < 0.0)
+			elif e.has_method("take_damage"):
 				e.call("take_damage", 1, dx < 0.0, SLIDE_HIT_KB)
-				slide_hit_ids[id] = true
+			slide_hit_ids[id] = true
 
 # ── Puñetazo corriendo (run punch) ───────────────────────────────────────────
 
@@ -1391,12 +1470,26 @@ func _handle_nitro_run(_delta: float) -> void:
 
 func _update_collision() -> void:
 	var cap := collision.shape as CapsuleShape2D
-	if state in [State.CROUCH, State.CROUCH_WALK, State.ROLL, State.CROUCH_ATTACKING, State.SLIDE]:
-		cap.height           = 38.0
-		collision.position.y = 15.0
+	if state == State.SLIDE:
+		cap.height           = 79.8
+		cap.radius           = 30.0
+		collision.position.y = 41.7
+		collision.position.x = 28.0 if facing_right else -28.0
+	elif state in [State.CROUCH, State.CROUCH_WALK, State.ROLL, State.CROUCH_ATTACKING]:
+		cap.height           = 79.8
+		cap.radius           = 12.0
+		collision.position.y = 41.7
+		collision.position.x = 10.0 if facing_right else -10.0
+	elif state in [State.JUMP_SQUAT, State.JUMP, State.FALL, State.DOUBLE_JUMP]:
+		cap.height           = 115.6
+		cap.radius           = 12.0
+		collision.position.y = 23.8
+		collision.position.x = 10.0 if facing_right else -10.0
 	else:
-		cap.height           = 68.0
-		collision.position.y = 0.0
+		cap.height           = 115.6
+		cap.radius           = 12.0
+		collision.position.y = 23.8
+		collision.position.x = 10.0 if facing_right else -10.0
 	# Agachado/slide: ignora autos aéreos (layer 4 = bit 8) para poder pasar por debajo.
 	if state == State.SLIDE or state == State.CROUCH or state == State.CROUCH_WALK \
 			or state == State.ROLL or state == State.CROUCH_ATTACKING:
@@ -1424,6 +1517,9 @@ func _update_sprite() -> void:
 		State.JUMP_TO_CROUCH:
 			if tex_jump_to_crouch_frames.size() > 0:
 				sprite.texture = tex_jump_to_crouch_frames[jump_to_crouch_frame_index]
+		State.DOUBLE_JUMP:
+			if tex_double_jump_frames.size() > 0:
+				sprite.texture = tex_double_jump_frames[double_jump_frame_index]
 		State.JUMP_SQUAT, State.JUMP, State.FALL, State.LAND:
 			if jump_from_run and tex_run_jump_frames.size() > 0:
 				sprite.texture = tex_run_jump_frames[mini(jump_frame_index, tex_run_jump_frames.size() - 1)]
@@ -1477,6 +1573,11 @@ func _update_sprite() -> void:
 		sprite.modulate.a = death_timer / DEATH_FADE_DUR
 	else:
 		sprite.modulate.a = 0.35 if (iframe_timer > 0.0 and int(iframe_timer * 10) % 2 == 0) else 1.0
+
+	if state in [State.JUMP_SQUAT, State.JUMP, State.FALL, State.RUN_JUMP, State.DOUBLE_JUMP, State.JUMP_TO_CROUCH, State.AIR_KICKING]:
+		sprite.position.y = -4.0 + JUMP_SPRITE_Y_OFFSET
+	else:
+		sprite.position.y = -4.0
 
 # ── Sombra blob ──────────────────────────────────────────────────────────────
 

@@ -106,9 +106,20 @@ func _process(_delta: float) -> void:
 	if not cam:
 		return
 	var world_offset := cam.get_screen_center_position().x * (1.0 - parallax)
+	var cam_base := cam.get_screen_center_position().x * parallax
 
 	for i in range(_sprites.size()):
 		var sp: Sprite2D = _sprites[i] as Sprite2D
 		var tw := sp.texture.get_width()
 		var sc := sp.scale.x
 		sp.global_position.x = _base_x[i] + world_offset - tw * sc * 0.5
+		if _base_x[i] < cam_base - 2000.0:
+			var placed := false
+			for _t in range(100):
+				var c := cam_base + _rng.randf_range(200.0, 50000.0)
+				if not _conflicts(c):
+					_base_x[i] = c
+					placed = true
+					break
+			if not placed:
+				_base_x[i] = cam_base + _rng.randf_range(200.0, 50000.0)

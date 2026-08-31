@@ -32,6 +32,7 @@ var _cam_limit       := 0.0
 var _wave_index      := 0
 var _wave_triggered  := false
 var _wave_enemies:   Array  = []
+var _floor_right_x:  float  = 32000.0
 
 # Colores de obstáculos
 const COL_PLATFORM := Color(0.15, 0.15, 0.2,  1.0)
@@ -94,21 +95,16 @@ func _ready() -> void:
 	if player:
 		player.modulate = night_char
 
+	# Pared izquierda — impide que el PP salga del área inicial
+	_create_left_wall(220)
+
 	# HUD
 	var hud: Node = HUD_SCENE.instantiate()
 	add_child(hud)
 
 	#_boss_node = get_node_or_null("Boss")
 
-	# Límite de cámara (se calcula después de que BuildingsLayer ponga la pizzeria)
-	_set_camera_limit()
-
-	# Drone desactivado temporalmente
-	var drone_node := get_node_or_null("Drone")
-	if drone_node:
-		drone_node.visible = false
-		drone_node.set_process(false)
-		drone_node.set_physics_process(false)
+	# Modo infinito: sin límite de cámara ni pared final
 
 	# Capa de autos del medio (obstáculos/plataformas)
 	var mid_layer := Node2D.new()
@@ -118,10 +114,7 @@ func _ready() -> void:
 	add_child(mid_layer)
 
 	# Colectivos y policías integrados en CarMidLayer
-
-	# Cop de prueba (desactivado temporalmente)
-	#_spawn_cop(500)
-
+	get_tree().debug_collisions_hint = true
 
 	# Mozos (tiran platos) repartidos a lo largo del nivel, antes del boss (~14600)
 	#_spawn_waiter(3000)
@@ -165,8 +158,22 @@ func _set_camera_limit() -> void:
 		cam.limit_right = int(LEVEL_LENGTH)
 		_create_right_wall(int(LEVEL_LENGTH))
 
+func _extend_floor() -> void:
+	const SEG_W := 32000.0
+	var body := StaticBody2D.new()
+	body.position = Vector2(_floor_right_x + SEG_W * 0.5, 727.6)
+	var col   := CollisionShape2D.new()
+	var shape := RectangleShape2D.new()
+	shape.size = Vector2(SEG_W, 16.0)
+	col.shape  = shape
+	body.add_child(col)
+	add_child(body)
+	_floor_right_x += SEG_W
+
 func _process(_delta: float) -> void:
 	var player := get_tree().get_first_node_in_group("player") as Node2D
+	if player and player.global_position.x > _floor_right_x - 5000.0:
+		_extend_floor()
 	if not player or not _boss_node:
 		return
 	if not _wave_triggered:
@@ -333,6 +340,17 @@ func _spawn_side_car(x: float, frame_idx: int) -> void:
 	col.shape    = rect
 	col.position = Vector2(0.0, -(CAR_PAD + CAR_BODY_H * 0.5) * sc)
 	body.add_child(col)
+
+# ── Pared invisible al inicio del nivel (impide retroceder) ─────────────────
+func _create_left_wall(x: int) -> void:
+	var wall := StaticBody2D.new()
+	wall.position = Vector2(x, 400.0)
+	var col   := CollisionShape2D.new()
+	var shape := RectangleShape2D.new()
+	shape.size = Vector2(32.0, 1200.0)
+	col.shape  = shape
+	wall.add_child(col)
+	add_child(wall)
 
 # ── Pared invisible al final del nivel ──────────────────────────────────────
 func _create_right_wall(x: int) -> void:

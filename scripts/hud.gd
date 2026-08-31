@@ -14,8 +14,8 @@ const HP_MAX           := 5
 const BOOST_BLOCKS     := 10
 
 # Canvas del juego en coordenadas de CanvasLayer
-const VW := 320.0
-const VH := 224.0
+const VW := 1280.0
+const VH := 720.0
 
 var player:       Node = null
 var is_game_over       := false
@@ -26,6 +26,9 @@ var _lbl_spd:    Label = null
 var _lbl_hull:   Label = null
 var _lbl_boost:  Label = null
 var _lbl_sector: Label = null
+
+var _drone:            Node  = null
+var _lbl_drone_marker: Label = null
 
 var _game_over_panel: ColorRect = null
 var _blink_t: float = 0.0
@@ -60,26 +63,33 @@ func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	add_to_group("hud")
 	player = get_tree().get_first_node_in_group("player")
+	_drone = get_tree().get_first_node_in_group("drone")
 	_build_hud()
 	_build_game_over()
 
 func _build_hud() -> void:
 	# ── TOP-LEFT: REC + timecode + HULL + BOOST apilados ─────────────────
-	_make_bg(Vector2(3, 3), Vector2(108, 56))
-	_lbl_rec  = _make_label("* REC", Vector2(6,  5), 8, C_RED)
-	_lbl_time = _make_label("00:00:00", Vector2(44, 5), 8, C_GREEN)
-	_make_label("HULL",  Vector2(6, 20), 7, C_DIM)
-	_lbl_hull  = _make_label("█████",       Vector2(6, 30), 8, C_GREEN)
-	_make_label("BOOST", Vector2(6, 42), 7, C_DIM)
-	_lbl_boost = _make_label("░░░░░░░░░░",  Vector2(6, 52), 8, C_GREEN)
+	_make_bg(Vector2(6, 6), Vector2(216, 112))
+	_lbl_rec  = _make_label("* REC",     Vector2(12, 10), 16, C_RED)
+	_lbl_time = _make_label("00:00:00",  Vector2(88, 10), 16, C_GREEN)
+	_make_label("HULL",  Vector2(12, 42), 14, C_DIM)
+	_lbl_hull  = _make_label("█████",       Vector2(12, 62), 16, C_GREEN)
+	_make_label("BOOST", Vector2(12, 84), 14, C_DIM)
+	_lbl_boost = _make_label("░░░░░░░░░░",  Vector2(12, 104), 16, C_GREEN)
 
 	# ── TOP-RIGHT: velocidad ──────────────────────────────────────────────
-	_make_bg(Vector2(VW - 84, 3), Vector2(81, 14))
-	_lbl_spd = _make_label("SPD>0000", Vector2(VW - 81, 4), 8, C_GREEN)
+	_make_bg(Vector2(VW - 168, 6), Vector2(162, 28))
+	_lbl_spd = _make_label("SPD>0000", Vector2(VW - 162, 8), 16, C_GREEN)
 
 	# ── TOP-CENTER: sector ────────────────────────────────────────────────
-	_make_bg(Vector2(VW * 0.5 - 42, 3), Vector2(84, 14))
-	_lbl_sector = _make_label("SECTOR A-1", Vector2(VW * 0.5 - 39, 4), 8, C_DIM)
+	_make_bg(Vector2(VW * 0.5 - 84, 6), Vector2(168, 28))
+	_lbl_sector = _make_label("SECTOR A-1", Vector2(VW * 0.5 - 78, 8), 16, C_DIM)
+
+	# ── BOTTOM: barra de persecución del drone ────────────────────────────
+	_make_bg(Vector2(6, VH - 26), Vector2(VW - 12, 22))
+	_make_label("ESCAPE", Vector2(12, VH - 24), 14, C_DIM)
+	_make_label("PP",     Vector2(VW - 28, VH - 24), 14, C_GREEN)
+	_lbl_drone_marker = _make_label("▼", Vector2(600, VH - 24), 16, C_RED)
 
 func _build_game_over() -> void:
 	var panel := ColorRect.new()
@@ -90,16 +100,16 @@ func _build_game_over() -> void:
 
 	var t1 := Label.new()
 	t1.text     = "[ SIGNAL  LOST ]"
-	t1.position = Vector2(82, 90)
-	t1.add_theme_font_size_override("font_size", 14)
+	t1.position = Vector2(328, 320)
+	t1.add_theme_font_size_override("font_size", 28)
 	t1.add_theme_color_override("font_color", C_RED)
 	t1.add_theme_font_override("font", _mono_font())
 	panel.add_child(t1)
 
 	var t2 := Label.new()
 	t2.text     = "Z  =  RECONECTAR"
-	t2.position = Vector2(86, 114)
-	t2.add_theme_font_size_override("font_size", 9)
+	t2.position = Vector2(344, 370)
+	t2.add_theme_font_size_override("font_size", 18)
 	t2.add_theme_color_override("font_color", C_GREEN)
 	t2.add_theme_font_override("font", _mono_font())
 	panel.add_child(t2)
@@ -155,6 +165,24 @@ func _process(delta: float) -> void:
 	var vel: Variant = player.get("velocity")
 	var spd: float   = abs((vel as Vector2).x) if vel is Vector2 else 0.0
 	_lbl_spd.text = "SPD>%04d" % int(spd)
+
+	# CHASE BAR
+	if _lbl_drone_marker and _drone:
+		var is_escaped: bool = _drone.get("escaped")
+		var gap: float = _drone.call("get_gap")
+		var max_dist: float = _drone.get("max_escape_dist")
+		var t := clampf(gap / max_dist, 0.0, 1.0)
+		const DRONE_X_MAX := 1200.0  # drone cerca del PP (derecha)
+		const DRONE_X_MIN := 84.0    # drone escapado (izquierda)
+		_lbl_drone_marker.position.x = lerpf(DRONE_X_MAX, DRONE_X_MIN, t)
+		if is_escaped:
+			_lbl_drone_marker.add_theme_color_override("font_color", C_GREEN)
+		elif t < 0.33:
+			_lbl_drone_marker.add_theme_color_override("font_color", C_RED)
+		elif t < 0.66:
+			_lbl_drone_marker.add_theme_color_override("font_color", C_AMBER)
+		else:
+			_lbl_drone_marker.add_theme_color_override("font_color", C_GREEN)
 
 func _bar(filled: int, total: int) -> String:
 	var s := ""

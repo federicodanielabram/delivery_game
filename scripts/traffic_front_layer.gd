@@ -69,6 +69,7 @@ func _ready() -> void:
 		sp.centered = false
 		sp.scale = Vector2(sc, sc)
 		sp.z_index = 4
+		sp.modulate = Color(0.55, 0.50, 0.65)
 		add_child(sp)
 		_objects.append({"cx": cx, "hw": hw, "sp": sp, "is_moto": is_moto})
 
@@ -91,6 +92,7 @@ func _process(_delta: float) -> void:
 		return
 	var world_offset := cam.get_screen_center_position().x * (1.0 - parallax)
 
+	var cam_base := cam.get_screen_center_position().x * parallax
 	for obj in _objects:
 		var sp: Sprite2D = obj["sp"]
 		var tw := sp.texture.get_width()
@@ -100,3 +102,14 @@ func _process(_delta: float) -> void:
 		sp.global_position.x = cx + world_offset - tw * sc * 0.5
 		var y_off := moto_y_offset if obj["is_moto"] else 0.0
 		sp.global_position.y = _screen_bottom - th * sc * 0.75 + y_off
+		if cx < cam_base - 2000.0:
+			var hw: float = obj["hw"]
+			var placed := false
+			for _t in range(100):
+				var c := cam_base + _rng.randf_range(200.0, 50000.0)
+				if not _conflicts(c, hw):
+					obj["cx"] = c
+					placed = true
+					break
+			if not placed:
+				obj["cx"] = cam_base + _rng.randf_range(200.0, 50000.0)
