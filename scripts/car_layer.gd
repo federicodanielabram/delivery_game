@@ -1,97 +1,78 @@
 extends Node2D
 
-@export var parallax: float = 1.2
-@export var car_count: int = 110
-@export var car_scale: float = 0.137
+@export var parallax:   float = 1.2
+@export var car_scale:  float = 0.137
 
-const LEVEL_WIDTH: int = 32000
-const FRAME_COUNT: int = 8
-const FLOOR_TOP_Y: float = 665.0
-const MIN_DIST_CAR_CAR: float = 210.0
-const MIN_DIST_CAR_MOTO: float = 130.0
+const FRAME_COUNT:    int   = 8
+const FLOOR_TOP_Y:    float = 665.0
+const LOOKAHEAD:      float = 6000.0
+const CLEANUP_BEHIND: float = 3000.0
+const SPACING_MIN:    float = 210.0
+const SPACING_MAX:    float = 520.0
 
-var _base_x: Array = []
-var _sprites: Array = []
-var _rng := RandomNumberGenerator.new()
-var _moto_positions: Array = []
-var _textures: Array = []
+var _sprites:    Array = []
+var _base_x:     Array = []
+var _rng             := RandomNumberGenerator.new()
+var _textures:   Array = []
+var _gen_head_x: float = 0.0
+var _stop_x:     float = -1.0
+
+func stop_at(x: float) -> void:
+	_stop_x = x
 
 func get_placed_x() -> Array:
 	return _base_x
 
-func _conflicts(x: float) -> bool:
-	for mx in _moto_positions:
-		if absf(x - float(mx)) < MIN_DIST_CAR_MOTO:
-			return true
-	for cx in _base_x:
-		if absf(x - float(cx)) < MIN_DIST_CAR_CAR:
-			return true
-	return false
-
-func _safe_x() -> float:
-	for _try in range(50):
-		var x := _rng.randf_range(0.0, LEVEL_WIDTH)
-		if not _conflicts(x):
-			return x
-	return _rng.randf_range(0.0, LEVEL_WIDTH)
-
 func _ready() -> void:
 	_rng.randomize()
-
-	var moto_layer := get_node_or_null("../MotoLayer")
-	if moto_layer:
-		_moto_positions = moto_layer.call("get_placed_x")
-
 	for i in range(FRAME_COUNT):
-		var path := "res://assets/sprites/cars/side_test/car_side_%02d.png" % i
-		var tex: Texture2D = load(path)
-		_textures.append(tex)
+		_textures.append(load("res://assets/sprites/cars/side_test/car_side_%02d.png" % i))
 
-	var order: Array = range(FRAME_COUNT)
-	order.shuffle()
-	for i in range(car_count):
-		var frame_idx: int = order[i % order.size()]
-		var tex: Texture2D = _textures[frame_idx]
-		if not tex:
-			continue
+func _spawn_car(cx: float) -> void:
+	var fi  := _rng.randi() % FRAME_COUNT
+	var tex: Texture2D = _textures[fi]
+	if not tex: return
+	var tw := tex.get_width()
+	var th := tex.get_height()
+	var sc := car_scale
+	var sp := Sprite2D.new()
+	sp.texture  = tex
+	sp.centered = false
+	sp.scale    = Vector2(sc, sc)
+	sp.z_index  = 2
+	add_child(sp)
+	_base_x.append(cx)
+	_sprites.append(sp)
 
-		var tw := tex.get_width()
-		var th := tex.get_height()
-		var sc := car_scale
-		var px := _safe_x()
+func _fill_lookahead(cam_base: float) -> void:
+	var limit := (cam_base + LOOKAHEAD) if _stop_x < 0.0 else minf(cam_base + LOOKAHEAD, _stop_x)
+	while _gen_head_x < limit:
+		_spawn_car(_gen_head_x)
+		_gen_head_x += _rng.randf_range(SPACING_MIN, SPACING_MAX)
 
-		var sp := Sprite2D.new()
-		sp.texture = tex
-		sp.centered = false
-		sp.scale = Vector2(sc, sc)
-		# Bottom del sprite recortado = FLOOR_TOP_Y
-		sp.position = Vector2(px - tw * sc * 0.5, FLOOR_TOP_Y - th * sc)
-		sp.z_index = 2
-		add_child(sp)
-
-		_base_x.append(px)
-		_sprites.append(sp)
+func _cleanup_old(cam_base: float) -> void:
+	var cutoff := cam_base - CLEANUP_BEHIND
+	var i := 0
+	while i < _sprites.size():
+		if _base_x[i] < cutoff:
+			(_sprites[i] as Node).queue_free()
+			_base_x.remove_at(i)
+			_sprites.remove_at(i)
+		else:
+			i += 1
 
 func _process(_delta: float) -> void:
 	var cam := get_viewport().get_camera_2d()
-	if not cam:
-		return
-	var world_offset := cam.get_screen_center_position().x * (1.0 - parallax)
-	var cam_base := cam.get_screen_center_position().x * parallax
-
+	if not cam: return
+	var cam_center   := cam.get_screen_center_position().x
+	var world_offset := cam_center * (1.0 - parallax)
+	var cam_base     := cam_center * parallax
+	_fill_lookahead(cam_base)
+	_cleanup_old(cam_base)
 	for i in range(_sprites.size()):
 		var sp: Sprite2D = _sprites[i] as Sprite2D
 		var tw := sp.texture.get_width()
+		var th := sp.texture.get_height()
 		var sc := sp.scale.x
-		var new_x: float = _base_x[i] + world_offset
-		sp.global_position.x = new_x - tw * sc * 0.5
-		if _base_x[i] < cam_base - 2000.0:
-			var placed := false
-			for _t in range(100):
-				var c := cam_base + _rng.randf_range(200.0, 50000.0)
-				if not _conflicts(c):
-					_base_x[i] = c
-					placed = true
-					break
-			if not placed:
-				_base_x[i] = cam_base + _rng.randf_range(200.0, 50000.0)
+		sp.global_position.x = _base_x[i] + world_offset - tw * sc * 0.5
+		sp.global_position.y = FLOOR_TOP_Y - th * sc
