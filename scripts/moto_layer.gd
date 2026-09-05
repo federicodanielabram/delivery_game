@@ -5,8 +5,8 @@ extends Node2D
 
 const FRAME_COUNT:    int   = 18
 const FLOOR_TOP_Y:    float = 663.0
-const LOOKAHEAD:      float = 6000.0
-const CLEANUP_BEHIND: float = 3000.0
+const LOOKAHEAD:      float = 2000.0
+const CLEANUP_BEHIND: float = 1500.0
 const SPACING_MIN:    float = 120.0
 const SPACING_MAX:    float = 380.0
 

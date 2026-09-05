@@ -1,10 +1,11 @@
 extends CharacterBody2D
 
 const GRAVITY        := 850.0
-const MAX_HP         := 10
+const PARALLAX       := 1.275
+const MAX_HP         := 8
 const MOVE_SPEED     := 75.0
-const DETECT_RANGE   := 99999.0
-const ATTACK_RANGE   := 140.0
+const DETECT_RANGE   := 900.0
+const ATTACK_RANGE   := 100.0
 const ATTACK_CDN     := 2.2
 const HURT_DUR       := 0.4
 const KNOCKBACK_DEC  := 400.0
@@ -16,7 +17,7 @@ const WALK_LOOP_FRAMES  := 32
 const WALK_END_FPS      := 24.0
 const WALK_END_FRAMES   := 10
 const ATTACK_FPS        := 28.0
-const ATTACK_FRAMES     := 52
+const ATTACK_FRAMES     := 48
 const ATTACK_HIT_FRAME  := 28
 const HURT_FPS          := 24.0
 const HURT_FRAMES       := 44
@@ -35,10 +36,12 @@ var attack_timer     := 0.0
 var hurt_timer       := 0.0
 var knockback        := Vector2.ZERO
 var patrol_origin    := Vector2.ZERO
-var _attack_hit_done := false
+var _attack_hit_done  := false
+var _parallax_base_x  := 0.0
+var _cam_ready        := false
 var player: CharacterBody2D = null
 
-var obstacle_mode: bool = false   # true cuando lo spawna el mid layer como obstáculo
+var obstacle_mode: bool = false
 
 var hp_bar_node:   Node2D = null
 var hp_bar_blocks: Array  = []
@@ -50,8 +53,9 @@ var _shadow: Sprite2D = null
 func _ready() -> void:
 	collision_layer = 4
 	collision_mask  = 1
-	z_index = 3
+	z_index = 2
 	add_to_group("enemy")
+	add_to_group("cop")
 	patrol_origin = global_position
 	_load_sprites()
 	_build_hp_bar()
@@ -95,7 +99,7 @@ func _load_sprites() -> void:
 	frames.add_animation("walk_start")
 	frames.set_animation_loop("walk_start", false)
 	frames.set_animation_speed("walk_start", WALK_START_FPS)
-	for i in range(1, WALK_START_FRAMES + 1):
+	for i in range(5, 10):  # frames 005-009; 002-004 skip (static/pre-walk)
 		var tex := load(BASE + "/walk_start/cop__%s.png" % str(i).pad_zeros(3)) as Texture2D
 		if tex: frames.add_frame("walk_start", tex)
 
@@ -135,8 +139,9 @@ func _load_sprites() -> void:
 		if tex: frames.add_frame("death", tex)
 
 	sprite.sprite_frames = frames
-	sprite.position = Vector2(0, -30)
-	sprite.scale    = Vector2(1.1, 1.1)
+	sprite.position   = Vector2(0, -30)
+	sprite.scale      = Vector2(1.1, 1.1)
+	sprite.light_mask = 2
 	sprite.play("idle")
 
 func _build_hp_bar() -> void:
@@ -164,12 +169,22 @@ func _refresh_hp_bar() -> void:
 			Color(0.0, 1.0, 0.85) if i < hp else Color(0.06, 0.06, 0.14)
 
 func _physics_process(delta: float) -> void:
+	var cam := get_viewport().get_camera_2d()
+	var cam_x := cam.get_screen_center_position().x if cam else 0.0
+
+	if not _cam_ready and cam:
+		_parallax_base_x = global_position.x - cam_x * (1.0 - PARALLAX)
+		_cam_ready = true
+
+	if _cam_ready:
+		global_position.x = _parallax_base_x + cam_x * (1.0 - PARALLAX)
+
 	if state == State.DEAD:
 		velocity = Vector2.ZERO
-		move_and_slide()
+		if _cam_ready:
+			_parallax_base_x = global_position.x - cam_x * (1.0 - PARALLAX)
 		return
 
-	# En modo obstáculo: parado, sin AI, X controlada externamente por car_mid_layer
 	if obstacle_mode:
 		velocity.x = 0.0
 		if not is_on_floor():
@@ -194,8 +209,22 @@ func _physics_process(delta: float) -> void:
 		State.HURT:   _do_hurt(delta)
 
 	sprite.flip_h = facing_right
+	if state == State.ATTACK:
+		var attack_x := 17.0 if not facing_right else -17.0
+		sprite.position.x = attack_x
+	elif sprite.animation == "walk_start":
+		# frame 0 (cop__005) = idle pose → same offset as idle
+		# frame 4 (cop__009) = walk pose → same offset as walk_loop
+		var idle_x := 45.0 if not facing_right else -35.0
+		var walk_x := 45.0 if not facing_right else -35.0
+		var t := float(sprite.frame) / 4.0
+		sprite.position.x = lerpf(idle_x, walk_x, t)
+	else:
+		sprite.position.x = 45.0 if not facing_right else -35.0
 	_update_walk_anim()
 	move_and_slide()
+	if _cam_ready:
+		_parallax_base_x = global_position.x - cam_x * (1.0 - PARALLAX)
 
 func _update_walk_anim() -> void:
 	if state == State.ATTACK or state == State.HURT or state == State.DEAD:
@@ -223,14 +252,11 @@ func _update_walk_anim() -> void:
 				sprite.play("walk_start")
 
 func _do_patrol(delta: float) -> void:
-	if player and _player_dist() <= DETECT_RANGE:
-		state = State.ALERT
-		return
-	var target_x := patrol_origin.x + (260.0 if facing_right else -260.0)
-	var dir := signf(target_x - global_position.x)
-	velocity.x = move_toward(velocity.x, dir * MOVE_SPEED * 0.8, 200.0 * delta)
-	if global_position.x >= patrol_origin.x + 260.0:   facing_right = false
-	elif global_position.x <= patrol_origin.x - 260.0: facing_right = true
+	velocity.x = move_toward(velocity.x, 0.0, 400.0 * delta)
+	if player:
+		facing_right = player.global_position.x > global_position.x
+		if _player_dist() <= DETECT_RANGE:
+			state = State.ALERT
 
 func _do_alert(delta: float) -> void:
 	if not player:
@@ -238,18 +264,20 @@ func _do_alert(delta: float) -> void:
 		return
 	facing_right = player.global_position.x > global_position.x
 	var dist := _player_dist()
-	if dist <= ATTACK_RANGE and attack_timer <= 0.0 and _is_on_screen():
+	if dist <= ATTACK_RANGE and _is_on_screen():
 		velocity.x = move_toward(velocity.x, 0.0, 400.0 * delta)
-		state = State.ATTACK
-		_attack_hit_done = false
-		z_index = 4
-		sprite.play("attack")
+		if attack_timer <= 0.0:
+			state = State.ATTACK
+			walk_phase = WalkPhase.IDLE
+			_attack_hit_done = false
+			z_index = 3
+			sprite.play("attack")
 	else:
 		var dir := signf(player.global_position.x - global_position.x)
 		velocity.x = move_toward(velocity.x, dir * MOVE_SPEED, 250.0 * delta)
 
 func _do_attack(delta: float) -> void:
-	velocity.x = move_toward(velocity.x, 0.0, 400.0 * delta)
+	velocity.x = 0.0
 	if not _attack_hit_done and sprite.frame >= ATTACK_HIT_FRAME:
 		_attack_hit_done = true
 		_try_hit_player()
@@ -258,7 +286,7 @@ func _try_hit_player() -> void:
 	if not player: return
 	if _player_dist() > ATTACK_RANGE + 20.0: return
 	if player.has_method("take_damage"):
-		player.take_damage(1, facing_right)
+		player.take_damage(1, facing_right, 0.0)
 
 func _do_hurt(delta: float) -> void:
 	velocity.x  = knockback.x
@@ -274,8 +302,9 @@ func _on_animation_finished() -> void:
 		"walk_end":
 			walk_phase = WalkPhase.IDLE
 		"attack":
-			z_index = 3
-			attack_timer = ATTACK_CDN
+			z_index = 2
+			attack_timer = 0.0
+			walk_phase = WalkPhase.STOPPING
 			state = State.ALERT if (player and _player_dist() <= DETECT_RANGE * 1.5) else State.PATROL
 		"hurt":
 			state = State.ALERT if (player and _player_dist() <= DETECT_RANGE * 1.5) else State.PATROL
@@ -297,13 +326,18 @@ func take_damage(amount: int, from_right: bool, kb: float = 0.0) -> void:
 	_refresh_hp_bar()
 	if hp <= 0:
 		if obstacle_mode:
-			collision.disabled = true   # instantáneo: el PP pasa sin bloquearse
+			collision.disabled = true
 		_die()
 	else:
 		walk_phase = WalkPhase.IDLE
 		state      = State.HURT
 		hurt_timer = HURT_DUR
 		sprite.play("hurt")
+
+func take_weakness_damage(from_right: bool) -> void:
+	if state == State.DEAD: return
+	_refresh_hp_bar()
+	_die()
 
 func _die() -> void:
 	state = State.DEAD

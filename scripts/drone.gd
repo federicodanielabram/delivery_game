@@ -1,8 +1,9 @@
 extends Node2D
 
 @export var offset_y: float = -200.0
-@export var drone_speed: float = 240.0       # px/s — PP corre a 380, walk ~100
+@export var drone_speed: float = 700.0       # px/s — PP corre a 729; diferencia neta ~29px/s
 @export var max_escape_dist: float = 1600.0  # distancia de escape en px
+@export var rest_offset: float = 120.0       # px a la izquierda del PP en reposo; cámara tiene +384 offset → PP aparece en x=256 desde borde izq
 @export var tilt_factor: float = 0.003
 @export var tilt_max: float = 0.25
 @export var tilt_speed: float = 4.0
@@ -161,7 +162,7 @@ func _ready() -> void:
 	_anim.add_child(_halo_blue)
 
 	if _target:
-		global_position = Vector2(_target.global_position.x - max_escape_dist * 0.9, _target.global_position.y + offset_y)
+		global_position = Vector2(_target.global_position.x - rest_offset, _target.global_position.y + offset_y)
 		_prev_x = global_position.x
 		_cone_x = _target.global_position.x
 
@@ -169,15 +170,16 @@ func _process(delta: float) -> void:
 	if not _target: return
 	if escaped: return
 
+	# Persecución bidireccional: el dron mantiene rest_offset px a la izquierda del PP
+	var rest_x := _target.global_position.x - rest_offset
+	var dir_x := rest_x - global_position.x
+	global_position.x += clampf(dir_x, -drone_speed * delta, drone_speed * delta)
+
+	# Escape: si el PP logra alejarse max_escape_dist del dron
 	var gap := get_gap()
 	if gap >= max_escape_dist:
 		escaped = true
 		return
-
-	# Persecución: avanza hacia el PP pero sin superar drone_speed
-	var dir_x := _target.global_position.x - global_position.x
-	if dir_x > 0.0:
-		global_position.x += minf(drone_speed * delta, dir_x)
 
 	# Y: sigue la altura del PP suavemente
 	var target_y := _target.global_position.y + offset_y

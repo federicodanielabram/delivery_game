@@ -9,7 +9,7 @@ extends Node2D
 @export var light_dir_energy: float = 2.2
 @export var light_dir_scale: float = 24.0
 
-const LEVEL_WIDTH: int = 35000
+const LEVEL_WIDTH: int = 2000
 const FLOOR_Y: int = 655
 const MODE_NORMAL  := 0
 const MODE_FLICKER := 1
@@ -20,6 +20,7 @@ var _lamps: Array = []
 var _rng := RandomNumberGenerator.new()
 var _lamp_head_x: float = 0.0
 var _lamp_head_y: float = 0.0
+var _gen_head_x:  float = 0.0
 var _sprite_tex: Texture2D = null
 var _light_tex: GradientTexture2D = null
 var _cone_tex: ImageTexture = null
@@ -78,6 +79,7 @@ func _ready() -> void:
 	while x < LEVEL_WIDTH:
 		_add_lamp(x)
 		x += spacing
+	_gen_head_x = x
 
 func _add_lamp(x: float) -> void:
 	var img_h: float = _sprite_tex.get_height() * scale_factor
@@ -117,20 +119,33 @@ func _add_lamp(x: float) -> void:
 	light_pp.energy        = light_energy * 0.5
 	light_pp.texture_scale = light_scale
 	light_pp.range_z_min   = 3
+	light_pp.range_z_max   = 3
 	light_pp.position      = head_pos
 	add_child(light_pp)
+
+	var light_car := PointLight2D.new()
+	light_car.texture        = _light_tex
+	light_car.color          = light_color
+	light_car.energy         = light_energy * 0.5
+	light_car.texture_scale  = light_scale
+	light_car.range_z_max    = 2
+	light_car.set_item_cull_mask(2)
+	light_car.position       = head_pos
+	add_child(light_car)
 
 	var mode := MODE_FLICKER if (_lamps.size() % 3 == 2) else MODE_NORMAL
 	if mode == MODE_DEAD:
 		light.enabled     = false
 		light_dir.enabled = false
 		light_pp.enabled  = false
+		light_car.enabled = false
 
 	_lamps.append({
 		"sp":            sp,
 		"light":         light,
 		"light_dir":     light_dir,
 		"light_pp":      light_pp,
+		"light_car":     light_car,
 		"mode":          mode,
 		"sub_state":     0,
 		"timer":         _rng.randf_range(1.0, 8.0),
@@ -147,6 +162,7 @@ func finalize_for_pizzeria(skip_from: float, skip_to: float, extra_x: float) -> 
 			lamp["light"].enabled     = false
 			lamp["light_dir"].enabled = false
 			lamp["light_pp"].enabled  = false
+			lamp["light_car"].enabled = false
 	_add_lamp(extra_x)
 
 func _process(delta: float) -> void:
@@ -163,10 +179,12 @@ func _process(delta: float) -> void:
 		lamp["light"].global_position     = head_pos
 		lamp["light_dir"].global_position = head_pos
 		lamp["light_pp"].global_position  = head_pos
+		lamp["light_car"].global_position = head_pos
 
 		var light: PointLight2D     = lamp["light"]
 		var light_dir: PointLight2D = lamp["light_dir"]
 		var light_pp: PointLight2D  = lamp["light_pp"]
+		var light_car: PointLight2D = lamp["light_car"]
 		lamp["timer"] -= delta
 
 		match lamp["mode"]:
@@ -182,11 +200,13 @@ func _process(delta: float) -> void:
 						light.enabled     = !light.enabled
 						light_dir.enabled = light.enabled
 						light_pp.enabled  = light.enabled
+						light_car.enabled = light.enabled
 						lamp["flicker_timer"] = _rng.randf_range(0.03, 0.12)
 					if lamp["timer"] <= 0.0:
 						light.enabled     = true
 						light_dir.enabled = true
 						light_pp.enabled  = true
+						light_car.enabled = true
 						lamp["sub_state"] = 0
 						lamp["timer"] = _rng.randf_range(0.5, 3.0)
 
@@ -202,10 +222,34 @@ func _process(delta: float) -> void:
 						light.enabled     = !light.enabled
 						light_dir.enabled = light.enabled
 						light_pp.enabled  = light.enabled
+						light_car.enabled = light.enabled
 						lamp["flicker_timer"] = _rng.randf_range(0.04, 0.15)
 					if lamp["timer"] <= 0.0:
 						light.enabled     = false
 						light_dir.enabled = false
 						light_pp.enabled  = false
+						light_car.enabled = false
 						lamp["sub_state"] = 0
 						lamp["timer"] = _rng.randf_range(6.0, 22.0)
+
+	# Generación infinita de faroles
+	var cam_base := cam.get_screen_center_position().x * parallax
+	while _gen_head_x < cam_base + spacing * 4:
+		_add_lamp(_gen_head_x)
+		_gen_head_x += spacing
+
+	# Limpieza de faroles que quedaron atrás
+	var cutoff := cam_base - spacing * 3
+	var j := 0
+	while j < _lamps.size():
+		if _base_x[j] < cutoff:
+			var old: Dictionary = _lamps[j]
+			old["sp"].queue_free()
+			old["light"].queue_free()
+			old["light_dir"].queue_free()
+			old["light_pp"].queue_free()
+			old["light_car"].queue_free()
+			_lamps.remove_at(j)
+			_base_x.remove_at(j)
+		else:
+			j += 1

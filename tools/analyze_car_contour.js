@@ -8,7 +8,7 @@ const fs   = require('fs');
 
 const STEP      = 16;    // muestreo cada N px de canvas (→ ~4.5px en juego a escala 0.2782)
 const ALPHA_MIN = 40;    // alpha mínimo para considerar píxel del auto
-const SMOOTH_R  = 2;     // radio de suavizado (±px en el array de muestras)
+const SMOOTH_R  = 8;     // radio de suavizado (±px en el array de muestras)
 
 async function getContour(img) {
   const { data, width: W, height: H } = img.bitmap;

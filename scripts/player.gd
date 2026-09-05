@@ -385,7 +385,8 @@ func _physics_process(delta: float) -> void:
 		for i in get_slide_collision_count():
 			var col := get_slide_collision(i)
 			var collider := col.get_collider() as CollisionObject2D
-			if collider and collider.is_in_group("car_obstacle") and collider.collision_layer == 1:
+			if collider and collider.is_in_group("car_obstacle") and not collider.is_in_group("car_obstacle_tall") \
+					and (collider.collision_layer == 1 or collider.collision_layer == 8):
 				_last_surface_ground_car = true
 				break
 	# Bloqueo global: si entró en FALL justo al salir de un auto del piso, cancelarlo
@@ -671,15 +672,20 @@ func _handle_ground(delta: float) -> void:
 		return
 
 	if Input.is_action_just_pressed("ui_up"):
-		# Idle salta igual que walk: instantaneo, sin jump_squat
-		jump_frame_index  = 3
-		jump_frame_timer  = 0.0
-		jump_from_run     = true
-		jump_from_walk    = state != State.RUN
-		jump_from_idle    = state == State.IDLE
-		_double_jump_used = false
-		velocity.y        = RUN_JUMP_FORCE
-		state             = State.JUMP
+		jump_frame_index         = 3
+		jump_frame_timer         = 0.0
+		_double_jump_used        = false
+		_last_surface_ground_car = false
+		jump_from_run            = true
+		jump_from_walk           = state != State.RUN
+		jump_from_idle           = state == State.IDLE
+		var fwd := Input.get_axis("ui_left", "ui_right")
+		var pressing_fwd := fwd != 0.0 and ((fwd > 0.0) == facing_right)
+		# Bloqueado por pared: zerear velocidad horizontal para no salir disparado.
+		if state == State.RUN and pressing_fwd and absf(velocity.x) < 80.0:
+			velocity.x = 0.0
+		velocity.y = RUN_JUMP_FORCE
+		state      = State.JUMP
 		return
 
 	if state != State.RUN and combo_cooldown_timer <= 0.0 and Input.is_action_just_pressed("attack"):
@@ -1006,9 +1012,10 @@ func _handle_air(delta: float) -> void:
 		air_max = MAX_SPEED * NITRO_SPEED_MULT if nitro_active else MAX_SPEED
 	if dir != 0.0:
 		if (dir > 0.0) == facing_right:
-			# Hacia adelante (la dirección del salto): acelera. No gira el sprite en el aire;
-			# la imagen se da vuelta recién al cambiar de animación (al aterrizar a idle/run).
-			velocity.x = move_toward(velocity.x, dir * air_max, AIR_BRAKE * delta)
+			if is_on_wall():
+				velocity.x = move_toward(velocity.x, 0.0, AIR_BRAKE * delta)
+			else:
+				velocity.x = move_toward(velocity.x, dir * air_max, AIR_BRAKE * delta)
 		else:
 			# Dirección inversa: frena drásticamente hacia 0, sin desplazarse para atrás.
 			velocity.x = move_toward(velocity.x, 0.0, AIR_BRAKE * delta)

@@ -60,6 +60,10 @@ func _process(_delta: float) -> void:
 		return
 	var world_offset := cam.get_screen_center_position().x * (1.0 - parallax)
 
+	var cam_base := cam.get_screen_center_position().x * parallax
 	for i in range(_sprites.size()):
 		var new_x: float = _base_x[i] + world_offset
 		(_sprites[i] as Sprite2D).global_position.x = new_x
+		# Reciclar charcos que quedaron atrás
+		if _base_x[i] < cam_base - 1500.0:
+			_base_x[i] = cam_base + _rng.randf_range(800.0, 2500.0)

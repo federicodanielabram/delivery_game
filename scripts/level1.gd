@@ -33,6 +33,7 @@ var _wave_index      := 0
 var _wave_triggered  := false
 var _wave_enemies:   Array  = []
 var _floor_right_x:  float  = 32000.0
+var _left_wall:      AnimatableBody2D = null
 
 # Colores de obstáculos
 const COL_PLATFORM := Color(0.15, 0.15, 0.2,  1.0)
@@ -95,8 +96,16 @@ func _ready() -> void:
 	if player:
 		player.modulate = night_char
 
-	# Pared izquierda — impide que el PP salga del área inicial
-	_create_left_wall(220)
+	# Pared izquierda dinámica — empieza fuera de pantalla a la izquierda
+	_create_left_wall(-9999)
+
+	# Boss: desactivar completamente hasta que el drone escape
+	var boss_node := get_node_or_null("Boss")
+	if boss_node:
+		boss_node.process_mode = Node.PROCESS_MODE_DISABLED
+		if boss_node is CollisionObject2D:
+			(boss_node as CollisionObject2D).collision_layer = 0
+			(boss_node as CollisionObject2D).collision_mask  = 0
 
 	# HUD
 	var hud: Node = HUD_SCENE.instantiate()
@@ -171,6 +180,16 @@ func _extend_floor() -> void:
 	_floor_right_x += SEG_W
 
 func _process(_delta: float) -> void:
+	var cam := get_viewport().get_camera_2d()
+	if cam and _left_wall:
+		var half_vp  := get_viewport().get_visible_rect().size.x * 0.5 / cam.zoom.x
+		# Usar posición del player (no de la cámara) para evitar feedback loop con limit_left.
+		var player_node := get_tree().get_first_node_in_group("player") as Node2D
+		if player_node:
+			var target_x := player_node.global_position.x - half_vp
+			_left_wall.global_position.x = maxf(_left_wall.global_position.x, target_x)
+			cam.limit_left = int(_left_wall.global_position.x) - int(cam.offset.x)
+
 	var player := get_tree().get_first_node_in_group("player") as Node2D
 	if player and player.global_position.x > _floor_right_x - 5000.0:
 		_extend_floor()
@@ -343,7 +362,8 @@ func _spawn_side_car(x: float, frame_idx: int) -> void:
 
 # ── Pared invisible al inicio del nivel (impide retroceder) ─────────────────
 func _create_left_wall(x: int) -> void:
-	var wall := StaticBody2D.new()
+	var wall := AnimatableBody2D.new()
+	wall.sync_to_physics = false
 	wall.position = Vector2(x, 400.0)
 	var col   := CollisionShape2D.new()
 	var shape := RectangleShape2D.new()
@@ -351,6 +371,7 @@ func _create_left_wall(x: int) -> void:
 	col.shape  = shape
 	wall.add_child(col)
 	add_child(wall)
+	_left_wall = wall
 
 # ── Pared invisible al final del nivel ──────────────────────────────────────
 func _create_right_wall(x: int) -> void:

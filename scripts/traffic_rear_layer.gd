@@ -10,10 +10,9 @@ const FLOOR_TOP_Y:      float = 655.0
 const LAMP_SPACING:     float = 500.0
 const LAMP_HEAD_OFFSET: float = 140.0
 const LAMP_CLEAR:       float = 110.0
-const LOOKAHEAD:        float = 6000.0
-const CLEANUP_BEHIND:   float = 3000.0
-const SPACING_MIN:      float = 165.0
-const SPACING_MAX:      float = 360.0
+const LOOKAHEAD:        float = 2000.0
+const CLEANUP_BEHIND:   float = 1500.0
+const GAP_MAX:          float = 2.0    # separación máx. paragolpe a paragolpe — tráfico empaquetado
 
 var _objects: Array = []  # [{cx, base_y, sp}]
 var _rng             := RandomNumberGenerator.new()
@@ -63,16 +62,20 @@ func _ready() -> void:
 		total_h += float(d["actual_h"])
 	_moto_target_h = total_h / float(_moto_frame_data.size())
 
-func _spawn_vehicle(cx: float) -> void:
+## Coloca un vehículo con su borde izquierdo en left_x y devuelve su borde derecho
+## (left_x + ancho real), para que el llamador encadene el siguiente pegado a este.
+func _place_vehicle(left_x: float) -> float:
 	if _rng.randf() < 0.333:
 		var fi := _rng.randi() % MOTO_FRAME_COUNT
 		var tex: Texture2D = _moto_textures[fi]
-		if not tex: return
+		if not tex: return left_x + 50.0   # evita loop sin avance si falta el asset
 		var fd: Dictionary = _moto_frame_data[fi]
 		var sc  := moto_scale * (_moto_target_h / float(fd["actual_h"]))
 		var tw  := tex.get_width()
 		var th  := tex.get_height()
 		var ratio := float(fd["max_y"]) / float(th)
+		var w   := tw * sc
+		var cx  := left_x + w * 0.5
 		var sp := Sprite2D.new()
 		sp.texture  = tex
 		sp.centered = false
@@ -80,13 +83,16 @@ func _spawn_vehicle(cx: float) -> void:
 		sp.z_index  = 2
 		add_child(sp)
 		_objects.append({"cx": cx, "base_y": FLOOR_TOP_Y - th * sc * ratio, "sp": sp})
+		return left_x + w
 	else:
 		var fi := _rng.randi() % CAR_FRAME_COUNT
 		var tex: Texture2D = _car_textures[fi]
-		if not tex: return
+		if not tex: return left_x + 50.0   # evita loop sin avance si falta el asset
 		var sc := car_scale
 		var tw  := tex.get_width()
 		var th  := tex.get_height()
+		var w   := tw * sc
+		var cx  := left_x + w * 0.5
 		var sp := Sprite2D.new()
 		sp.texture  = tex
 		sp.centered = false
@@ -94,6 +100,7 @@ func _spawn_vehicle(cx: float) -> void:
 		sp.z_index  = 2
 		add_child(sp)
 		_objects.append({"cx": cx, "base_y": FLOOR_TOP_Y - th * sc, "sp": sp})
+		return left_x + w
 
 func _fill_lookahead(cam_base: float) -> void:
 	var limit := (cam_base + LOOKAHEAD) if _stop_x < 0.0 else minf(cam_base + LOOKAHEAD, _stop_x)
@@ -101,8 +108,7 @@ func _fill_lookahead(cam_base: float) -> void:
 		if _near_lamp(_gen_head_x):
 			_gen_head_x += 20.0
 			continue
-		_spawn_vehicle(_gen_head_x)
-		_gen_head_x += _rng.randf_range(SPACING_MIN, SPACING_MAX)
+		_gen_head_x = _place_vehicle(_gen_head_x) + _rng.randf_range(0.0, GAP_MAX)
 
 func _cleanup_old(cam_base: float) -> void:
 	var cutoff := cam_base - CLEANUP_BEHIND

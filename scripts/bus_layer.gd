@@ -61,6 +61,7 @@ func _place_buses() -> void:
 			body.position       = Vector2(x, FLOOR_Y + shadow_h * sc)
 			body.collision_layer = 1
 			body.collision_mask  = 0
+			body.add_to_group("bus_obstacle")
 			add_child(body)
 
 			var sp := Sprite2D.new()
@@ -70,13 +71,14 @@ func _place_buses() -> void:
 			sp.position = Vector2(-cw * sc * 0.5, -ch * sc)
 			body.add_child(sp)
 
-			# Colisión one-way en el techo: rectángulo fino, sin costados
+			# Rectángulo sólido desde el techo hasta el piso (body local 0 = bajo el nivel)
+			var rect_h  := (shadow_h + bh) * sc
+			var rect_cy := -(shadow_h + bh) * sc * 0.5
 			var col   := CollisionShape2D.new()
 			var shape := RectangleShape2D.new()
-			shape.size = Vector2(cw * sc * 0.80, 6.0)
-			col.shape                = shape
-			col.one_way_collision    = true
-			col.position             = Vector2(0.0, -(ch - ROOF_OFFSET) * sc)
+			shape.size   = Vector2(cw * sc, rect_h)
+			col.shape    = shape
+			col.position = Vector2(0.0, rect_cy)
 			body.add_child(col)
 
 			_base_x.append(x)

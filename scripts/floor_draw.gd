@@ -1,6 +1,6 @@
 extends Node2D
 
-const LEVEL_WIDTH: int = 20000
+const LEVEL_WIDTH: int = 500000
 const DEPTH: int = 400
 
 func _ready() -> void:
