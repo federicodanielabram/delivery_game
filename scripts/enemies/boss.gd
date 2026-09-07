@@ -135,12 +135,26 @@ func _load_sprites() -> void:
 		if tex: frames.add_frame("death", tex)
 
 	sprite.sprite_frames = frames
-	sprite.position = Vector2(0, -72)
+	# El pie dibujado (píxel opaco más bajo del PNG) NO coincide con el borde de
+	# abajo de la propia cápsula de colisión del boss — el arte trae relleno
+	# transparente asimétrico. Medido sobre los PNG reales (idle/walk/kick/
+	# attack/hurt, todos consistentes): canvas 400x400, AnimatedSprite2D
+	# centrado en el origen del nodo (ocupa de -200 a +200 en y local), pie
+	# real (fila opaca más baja) ≈ fila 391 → y local +192.
+	# La cápsula (CapsuleShape2D.height=90) tiene su borde de abajo en y local
+	# +45. Para que el pie dibujado quede EXACTO ahí:
+	#   offset = borde_abajo_capsula - pie_real = 45 - 192 = -147
+	# Ajuste manual pedido después: bajar la IMAGEN (y todo lo que va pegado a
+	# ella — sprite + barra de vida) 10px respecto al hitbox, que no se toca.
+	# -147 + 10 = -137.
+	sprite.position = Vector2(0, -137)
 	sprite.play("idle")
 
 func _build_hp_bar() -> void:
 	var bar  := Node2D.new()
-	bar.position = Vector2(0, -210)
+	# Va pegada a la cabeza del sprite, así que baja los mismos 10px que él:
+	# -285 + 10 = -275.
+	bar.position = Vector2(0, -275)
 	bar.visible  = false
 	var bw    := 6.0
 	var gap   := 2.0

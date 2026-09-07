@@ -23,9 +23,13 @@ var is_game_over       := false
 var _lbl_rec:    Label = null
 var _lbl_time:   Label = null
 var _lbl_spd:    Label = null
+var _lbl_dist:   Label = null
 var _lbl_hull:   Label = null
 var _lbl_boost:  Label = null
 var _lbl_sector: Label = null
+
+var _start_x: float = 0.0
+var _has_start_x: bool = false
 
 var _drone:            Node  = null
 var _lbl_drone_marker: Label = null
@@ -77,9 +81,11 @@ func _build_hud() -> void:
 	_make_label("BOOST", Vector2(12, 84), 14, C_DIM)
 	_lbl_boost = _make_label("░░░░░░░░░░",  Vector2(12, 104), 16, C_GREEN)
 
-	# ── TOP-RIGHT: velocidad ──────────────────────────────────────────────
+	# ── TOP-RIGHT: velocidad + distancia recorrida ────────────────────────
 	_make_bg(Vector2(VW - 168, 6), Vector2(162, 28))
 	_lbl_spd = _make_label("SPD>0000", Vector2(VW - 162, 8), 16, C_GREEN)
+	_make_bg(Vector2(VW - 168, 38), Vector2(162, 28))
+	_lbl_dist = _make_label("PX>000000", Vector2(VW - 162, 40), 16, C_GREEN)
 
 	# ── TOP-CENTER: sector ────────────────────────────────────────────────
 	_make_bg(Vector2(VW * 0.5 - 84, 6), Vector2(168, 28))
@@ -134,6 +140,13 @@ func _process(delta: float) -> void:
 	_lbl_rec.modulate.a = 1.0 if fmod(_blink_t, 1.0) < 0.55 else 0.2
 
 	if not player: return
+
+	# DIST — px recorridos desde que arrancó a andar el player
+	if not _has_start_x:
+		_start_x     = player.global_position.x
+		_has_start_x = true
+	var dist := int(player.global_position.x - _start_x)
+	_lbl_dist.text = "PX>%06d" % maxi(dist, 0)
 
 	# HULL
 	var hp: int = player.get("hp")

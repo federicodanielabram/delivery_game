@@ -27,11 +27,12 @@ const DEATH_FRAMES := 14
 
 const PLATE_SCENE := preload("res://scenes/enemies/Plate.tscn")
 
-enum State { PATROL, ALERT, THROW, HURT, DEAD }
+enum State { ENTRANCE, PATROL, ALERT, THROW, HURT, DEAD }
 
 var state         := State.PATROL
 var facing_right  := false
 var hp            := MAX_HP
+var entrance_target_x := 0.0
 
 var throw_timer        := 0.0
 var throw_burst_left   := 4
@@ -63,6 +64,22 @@ func _ready() -> void:
 
 func _find_player() -> void:
 	player = get_tree().get_first_node_in_group("player") as CharacterBody2D
+
+# Entra caminando desde fuera de pantalla hacia target_x — usado en la arena
+# de la pizzeria, para que no aparezcan de golpe sino que se los vea llegar.
+func start_entrance(target_x: float) -> void:
+	entrance_target_x = target_x
+	facing_right      = target_x > global_position.x
+	state             = State.ENTRANCE
+
+func _do_entrance(_delta: float) -> void:
+	var dir := signf(entrance_target_x - global_position.x)
+	facing_right = dir > 0.0
+	velocity.x   = dir * MOVE_SPEED * 1.3
+	if absf(entrance_target_x - global_position.x) < 10.0:
+		velocity.x     = 0.0
+		patrol_origin  = global_position
+		state          = State.PATROL
 
 func _skin_path() -> String:
 	return "res://assets/sprites/enemies/waiter" + ("_" + skin_variant if skin_variant != "" else "")
@@ -134,12 +151,22 @@ func _load_sprites() -> void:
 		if tex: frames.add_frame("death", tex)
 
 	sprite.sprite_frames = frames
-	sprite.position = Vector2(0, -4)
+	# Mismo problema que el boss (ver boss.gd _load_sprites): el pie dibujado no
+	# coincide con el borde de abajo de la propia cápsula. Medido sobre los PNG
+	# reales (idle/walk, las 3 skins Waiter/Dark/Light comparten arte):
+	# canvas 200x200 (sprite centrado → -100 a +100 en y local), pie real
+	# (fila opaca más baja) ≈ fila 191 → y local +92.
+	# Cápsula (CapsuleShape2D.height=68) → borde de abajo en y local +34.
+	#   offset = borde_abajo_capsula - pie_real = 34 - 92 = -58
+	sprite.position = Vector2(0, -58)
 	sprite.play("idle")
 
 func _build_hp_bar() -> void:
 	var bar := Node2D.new()
-	bar.position = Vector2(0, -56)
+	# -56 estaba calibrado para el offset de sprite viejo (-4); al subir el
+	# sprite a -58 (ver _load_sprites) la cabeza subió con él, así que la barra
+	# sube lo mismo para mantener la misma distancia: -56 + (-58 - (-4)) = -110.
+	bar.position = Vector2(0, -110)
 	bar.visible  = false
 	var bw   := 6.0
 	var gap  := 2.0
@@ -174,11 +201,12 @@ func _physics_process(delta: float) -> void:
 	if pace_timer  > 0.0: pace_timer  -= delta
 
 	match state:
-		State.PATROL: _do_patrol(delta)
-		State.ALERT:  _do_alert(delta)
-		State.THROW:  _do_throw(delta)
-		State.HURT:   _do_hurt(delta)
-		State.DEAD:   velocity.x = move_toward(velocity.x, 0.0, 300.0 * delta)
+		State.ENTRANCE: _do_entrance(delta)
+		State.PATROL:   _do_patrol(delta)
+		State.ALERT:    _do_alert(delta)
+		State.THROW:    _do_throw(delta)
+		State.HURT:     _do_hurt(delta)
+		State.DEAD:     velocity.x = move_toward(velocity.x, 0.0, 300.0 * delta)
 
 	sprite.flip_h = facing_right
 	_update_anim(delta)
@@ -187,7 +215,7 @@ func _physics_process(delta: float) -> void:
 func _update_anim(delta: float) -> void:
 	if state == State.THROW or state == State.HURT or state == State.DEAD: return
 
-	var moving: bool = abs(velocity.x) > 1.0 and (state == State.PATROL or state == State.ALERT)
+	var moving: bool = abs(velocity.x) > 1.0 and (state == State.PATROL or state == State.ALERT or state == State.ENTRANCE)
 
 	# Transiciones idle_to_walk y walk_to_idle disponibles pero desactivadas
 	if moving:

@@ -1,7 +1,11 @@
 extends Node2D
 
 @export var car_scale:  float = 0.2782   # 553px target / 1392px body * 0.7
-@export var parallax:   float = 1.275
+@export var parallax:   float = 1.2    # mismo ritmo que los charcos (puddle_layer.gd). Con
+										# parallax≠1 estos autos (colisión real) igual se
+										# reposicionan un poco cada frame según la cámara — hay
+										# algo de corrimiento real respecto a un objeto 100% fijo
+										# como el piso, pero mucho menor que el 1.275 anterior.
 
 const LEVEL_WIDTH:  int   = 32000
 const FRAME_COUNT:       int = 8
@@ -9,25 +13,28 @@ const FRAME_COUNT_NEW:   int = 9
 const FLOOR_Y:      float = 735.0
 const MIN_DIST:     float = 600.0
 
-# Ritmo tipo dino con dificultad progresiva (t=0 inicio → t=1 final del nivel)
-# Todos los gaps usan curva ease-in (t²): arranque muy cómodo, cierre más exigente.
+# Config fija, pensada para sostenerse al infinito — la presión progresiva la
+# da el dron (persigue casi a la misma velocidad que el PP), no el espaciado
+# del tráfico. Los gaps varían dentro de un rango fijo para variedad rítmica,
+# pero ya no se achican con la distancia.
 const START_X: float = 2500.0   # primer obstáculo: el jugador ya arrancó a correr
 
-# Gap borde-a-borde DENTRO de un grupo (entre autos consecutivos)
-const INNER_GAP_EASY_MIN: float = 700.0   # t=0: 1.44s — muy holgado, aprendizaje
-const INNER_GAP_EASY_MAX: float = 1000.0
-const INNER_GAP_HARD_MIN: float = 180.0   # t=1: 0.37s — ajustado, requiere timing
-const INNER_GAP_HARD_MAX: float = 350.0
+# Gap borde-a-borde DENTRO de un grupo (entre obstáculos consecutivos, dado)
+const INNER_GAP_MIN: float = 500.0
+const INNER_GAP_MAX: float = 750.0
 
-# Gap borde-a-borde ENTRE grupos (respiro)
-const BREATH_GAP_EASY_MIN: float = 3000.0  # t=0: 6.2s — mucho respiro
-const BREATH_GAP_EASY_MAX: float = 5000.0
-const BREATH_GAP_HARD_MIN: float = 1200.0  # t=1: 2.5s — respiro justo
-const BREATH_GAP_HARD_MAX: float = 2200.0
+# Gap borde-a-borde ENTRE grupos/singles (respiro)
+const BREATH_GAP_MIN: float = 1800.0
+const BREATH_GAP_MAX: float = 3000.0
 
-# Probabilidades de tamaño de grupo [solo, par, trío] — se interpolan con t
-const GROUP_PROB_EASY: Array = [0.85, 0.13, 0.02]  # casi siempre autos solos
-const GROUP_PROB_HARD: Array = [0.35, 0.45, 0.20]  # grupos frecuentes al final
+# Probabilidad de tamaño de grupo [solo, dúo, trío] — fija
+const GROUP_PROB: Array = [0.35, 0.25, 0.40]
+
+# Prearmados: solo se sortean cuando el tamaño de grupo dio dúo/trío; de esas
+# veces, 50% se reemplaza por un patrón de la bolsa en vez de armarlo al dado.
+# No aparecen hasta pasar el warm-up (el jugador ve tráfico simple primero).
+const PATTERN_CHANCE:      float = 0.5
+const PATTERN_WARMUP_DIST: float = 4500.0
 
 # Anchos reales de carrocería en px de mundo (canvas_span * scale * mult)
 # Calculados de los contornos: primer→último índice no-cero × CONTOUR_STEP × scale × mult
@@ -109,7 +116,8 @@ const BUS_DATA: Array = [
 	{"cw": 1007.0, "ch": 386.0, "body_h": 309.0},  # bus_02
 	{"cw": 1009.0, "ch": 394.0, "body_h": 315.0},  # bus_03
 ]
-const BUS_SCALE:       float = 0.8232
+const BUS_SCALE:       float = 0.7632  # bajado de 0.8232: techo a ~290px (antes ~313px),
+										# deja margen de timing real para llegar en doble salto
 const BUS_FLOOR_Y:     float = 725.0
 const BUS_ROOF_OFFSET: float = 15.0
 
@@ -138,11 +146,55 @@ const RAMP_TIP_EXTEND_LEFT: float = 10.9   # estira la punta izquierda de la ram
 
 # ── Policía ───────────────────────────────────────────────────────────────────
 const COP_SCENE := preload("res://scenes/enemies/Cop.tscn")
-const COP_W:     float = 200.0   # ancho aproximado para cálculo de gaps
+# Tinte propio del cop, más claro que el resto de la línea del medio a propósito:
+# el uniforme táctico es de base muy oscuro (azul marino/negro), así que el mismo
+# multiplicador que a un auto se le nota mucho más oscuro al lado del PP — hay que
+# sobre-compensarlo para que quede a la par visualmente.
+const COP_TINT:  Color = Color(0.95, 0.90, 1.05)
+const COP_W:     float = 340.0   # ancho para cálculo de gaps — con margen real: canvas 256×
+								  # scale 1.1 (~282px) + hasta 45px de offset del sprite según
+								  # hacia dónde mira (ver cop.gd), si no el hueco calculado
+								  # queda más chico de lo real y se ve pegado a lo de al lado
 
 const LOOKAHEAD:       float = 2000.0
 const CLEANUP_BEHIND:  float = 1500.0
-const DIFFICULTY_RAMP: float = 20000.0
+
+# ── Patrones prearmados ───────────────────────────────────────────────────────
+# Composiciones fijas, curadas a mano — se sacan de una bolsa sin reposición
+# (no se repite ninguno hasta pasar por todos) cuando PATTERN_CHANCE lo decide.
+const PATTERN_NAMES: Array = ["rampa_carrera", "techos_bus", "aereo_fakeout"]
+
+# rampa_carrera: camión + 3 autos pegados justo después. El gap camión→auto1
+# es grande a propósito (fuerza doble salto real: un salto simple desde la
+# plataforma del camión no alcanza a cubrirlo, un doble salto sí, con margen).
+const RAMPA_LAUNCH_GAP: float = 300.0
+const RAMPA_CARS_GAP:   float = 30.0
+
+# aereo_fakeout: auto aéreo (frame fijo, el más alto: ~259px de techo) seguido
+# de un colectivo. El gap da lugar a resolver el aéreo (agachado o saltado) y
+# DESPUÉS pararse en idle y saltar al techo del bus con normalidad (salto +
+# doble salto, igual que un colectivo suelto) — no es un arco único que cruza
+# los dos de una, a propósito: así siempre hay margen para frenar y pensar.
+const FAKEOUT_AERIAL_FRAME: int   = 3
+const FAKEOUT_GAP:          float = 450.0
+
+# techos_bus: cadena de colectivos/camiones para correr por los techos, con
+# la posibilidad de un auto aéreo a nivel calle en las transiciones (bajás,
+# lo esquivás con slide, volvés a subir).
+const ROOFTOP_PIECE_MIN:     int   = 3
+const ROOFTOP_PIECE_MAX:     int   = 4
+const ROOFTOP_TRUCK_CHANCE:  float = 0.35
+const ROOFTOP_GAP_MIN:       float = 600.0
+const ROOFTOP_GAP_MAX:       float = 900.0
+const ROOFTOP_AERIAL_CHANCE: float = 0.4
+# Cuando la transición SÍ tiene aéreo, se reemplaza el gap único de arriba por
+# dos huecos explícitos (no un centrado dentro de un gap random, que en el
+# peor caso podía dejar el aéreo casi pegado a un colectivo). El de "después"
+# es más grande a propósito: el PP tiene que poder salir del slide (dejar de
+# estar "bajo el aéreo", zona de 200px) y quedar parado/corriendo ANTES de
+# llegar al próximo techo — si no, queda bugueado a medio camino del salto.
+const ROOFTOP_AERIAL_GAP_BEFORE: float = 250.0
+const ROOFTOP_AERIAL_GAP_AFTER:  float = 320.0
 
 const CAR_CONTOURS_NEW: Dictionary = {
 	0: [0, 0, 0, 0, 0, 352, 355, 357, 359, 361, 363, 365, 367, 368, 375, 380, 382, 385, 388, 390, 392, 395, 397, 399, 402, 404, 406, 408, 410, 412, 414, 416, 418, 419, 421, 422, 424, 425, 426, 426, 427, 427, 426, 425, 424, 422, 419, 416, 413, 410, 405, 400, 395, 389, 384, 377, 371, 364, 358, 351, 345, 339, 333, 327, 321, 316, 310, 305, 300, 295, 290, 285, 280, 274, 268, 261, 258, 255, 253, 250, 247, 243, 240, 236, 0, 0, 0, 0, 0],
@@ -172,9 +224,15 @@ var _gen_head_x:   float = 0.0
 var _shadow_tex:   Texture2D = null
 var _bus_textures:   Array = []
 var _truck_textures: Array = []
+var _pattern_bag:    Array = []
+var _stop_x:         float = -1.0   # -1 = infinito; ver stop_at() — fin de nivel (pizzeria)
 
 func get_placed_x() -> Array:
 	return _base_x
+
+# Corta la generación a partir de x (usado al llegar a la pizzeria, fin del modo infinito).
+func stop_at(x: float) -> void:
+	_stop_x = x
 
 func _ready() -> void:
 	_rng.randomize()
@@ -187,10 +245,17 @@ func _ready() -> void:
 	_gen_head_x = START_X
 	_fill_lookahead(0.0)
 
+const _DEBUG_TYPE_NAMES := ["GROUND", "AERIAL", "BUS", "COP", "TRUCK"]
+
 func _spawn_obstacle(obs: Dictionary) -> void:
 	var sc := car_scale
 	var px: float = obs.x
 	var fi: int   = obs.frame
+	# DEBUG temporal — sacar cuando encontremos el bug de la "pared invisible".
+	# PX aprox. porque el player arranca en x=256 (ver Player en Game.tscn).
+	print("[obstacle] %s frame=%d x=%.0f (~PX %.0f) width=%s" % [
+		_DEBUG_TYPE_NAMES[obs.type], fi, px, px - 256.0, str(obs.get("width", "?"))
+	])
 	match obs.type:
 		OBS_GROUND:
 			var tex: Texture2D = load("res://assets/sprites/cars/side_test/car_side_%02d.png" % fi)
@@ -232,6 +297,10 @@ func _spawn_obstacle(obs: Dictionary) -> void:
 			sp.centered = false
 			sp.scale    = Vector2(frame_sc, frame_sc)
 			sp.position = Vector2(-CAR_CANVAS_W * frame_sc * 0.5, -CAR_CANVAS_H * frame_sc)
+			sp.light_mask = 2   # igual que los autos de piso: solo las luces "mid" (tenues) del
+								# dron — sin esto quedaba en el mask por defecto (1), enganchado
+								# a las luces fuertes del dron (cono principal energy=5.0), y se
+								# veía mucho más iluminado que el resto de la línea de noche
 			body.add_child(sp)
 			_add_contour_collision_new(body, fi, frame_sc)
 			var raw_a: Array = CAR_CONTOURS_NEW.get(fi, [])
@@ -351,10 +420,19 @@ func _spawn_obstacle(obs: Dictionary) -> void:
 			_truck_bodies.append(body)
 
 		OBS_COP:
-			# Comportamiento normal (patrulla/persigue/ataca) — solo el *spawn* está
-			# integrado al mismo sorteo y espaciado que el resto de los obstáculos.
+			# Comportamiento normal (patrulla/ataca) — solo el *spawn* está integrado
+			# al mismo sorteo y espaciado que el resto de los obstáculos.
+			# obstacle_mode=true: golpearlo (slide o air kick) no dispara hitstop, y
+			# bloquea físicamente al jugador si lo corre de lleno (ver player.gd).
 			var cop := COP_SCENE.instantiate() as Node2D
-			cop.position = Vector2(px, 600.0)
+			cop.position = Vector2(px, 570.0)   # 30px más arriba que el original (600) — sprite,
+												 # hitbox, área de contacto y sombra viajan
+												 # todos juntos porque son relativos a esto
+			cop.set("obstacle_mode", true)
+			# Se instancia como hermano de esta capa (no hijo), así que no hereda
+			# su modulate — se lo aplicamos a mano para que quede integrado con
+			# el resto de la línea del medio (autos/buses/camiones), no a color pleno.
+			cop.modulate = COP_TINT
 			get_parent().add_child(cop)
 
 func _car_body_bounds(raw: Array, sc: float) -> Dictionary:
@@ -470,73 +548,171 @@ func _process(_delta: float) -> void:
 
 func _fill_lookahead(cam_x: float) -> void:
 	var target_x := cam_x * parallax + LOOKAHEAD
+	if _stop_x >= 0.0:
+		target_x = minf(target_x, _stop_x)
 	var x := _gen_head_x
 	while x < target_x:
-		var t: float  = clampf((x - START_X) / DIFFICULTY_RAMP, 0.0, 1.0)
-		var tc: float = t * t
+		var group_size := _roll_group_size()
+		var past_warmup := (x - START_X) >= PATTERN_WARMUP_DIST
 
-		var inner_min  := lerpf(INNER_GAP_EASY_MIN,  INNER_GAP_HARD_MIN,  tc)
-		var inner_max  := lerpf(INNER_GAP_EASY_MAX,  INNER_GAP_HARD_MAX,  tc)
-		var breath_min := lerpf(BREATH_GAP_EASY_MIN, BREATH_GAP_HARD_MIN, tc)
-		var breath_max := lerpf(BREATH_GAP_EASY_MAX, BREATH_GAP_HARD_MAX, tc)
-		var p1 := lerpf(GROUP_PROB_EASY[0], GROUP_PROB_HARD[0], tc)
-		var p2 := lerpf(GROUP_PROB_EASY[1], GROUP_PROB_HARD[1], tc)
-
-		var roll := _rng.randf()
-		var group_size: int
-		if roll < p1:
-			group_size = 1
-		elif roll < p1 + p2:
-			group_size = 2
+		if group_size >= 2 and past_warmup and _rng.randf() < PATTERN_CHANCE:
+			x = _spawn_pattern(_next_pattern_name(), x)
 		else:
-			group_size = 3
+			x = _spawn_dice_group(group_size, x)
 
-		var last_x := x
-		var last_w := 370.0
-		for i in range(group_size):
-			var tr := _rng.randf()
-			var obs_type: int
-			if tr < OBS_PROB_GROUND:
-				obs_type = OBS_GROUND
-			elif tr < OBS_PROB_GROUND + OBS_PROB_AERIAL:
-				obs_type = OBS_AERIAL
-			elif tr < OBS_PROB_GROUND + OBS_PROB_AERIAL + OBS_PROB_BUS:
-				obs_type = OBS_BUS
-			elif tr < OBS_PROB_GROUND + OBS_PROB_AERIAL + OBS_PROB_BUS + OBS_PROB_TRUCK:
-				obs_type = OBS_TRUCK
-			else:
-				obs_type = OBS_COP
-
-			var local_idx: int
-			var body_w: float
-			match obs_type:
-				OBS_GROUND:
-					local_idx = _rng.randi() % FRAME_COUNT
-					body_w    = float(GROUND_BODY_W.get(local_idx, 370.0))
-				OBS_AERIAL:
-					local_idx = _rng.randi() % FRAME_COUNT_NEW
-					body_w    = float(AERIAL_BODY_W.get(local_idx, 347.0))
-				OBS_BUS:
-					local_idx = _rng.randi() % BUS_DATA.size()
-					body_w    = float(BUS_DATA[local_idx].cw) * BUS_SCALE
-				OBS_TRUCK:
-					local_idx = _rng.randi() % TRUCK_DATA.size()
-					body_w    = float(TRUCK_DATA[local_idx].cw) * TRUCK_SCALE
-				OBS_COP:
-					local_idx = 0
-					body_w    = COP_W
-				_:
-					local_idx = 0
-					body_w    = 370.0
-
-			_spawn_obstacle({"x": x, "type": obs_type, "frame": local_idx, "width": body_w})
-			last_x = x
-			last_w = body_w
-			if i < group_size - 1:
-				x += body_w + _rng.randf_range(inner_min, inner_max)
-
-		x = last_x + last_w + _rng.randf_range(breath_min, breath_max)
+		x += _rng.randf_range(BREATH_GAP_MIN, BREATH_GAP_MAX)
 	_gen_head_x = x
+
+func _roll_group_size() -> int:
+	var roll := _rng.randf()
+	if roll < GROUP_PROB[0]:
+		return 1
+	elif roll < GROUP_PROB[0] + GROUP_PROB[1]:
+		return 2
+	return 3
+
+# allow_cop=false redistribuye también la porción del cop (proporcional, junto
+# con la del camión si tampoco está permitido) — el cop solo sale en solitario.
+func _roll_obstacle_type(allow_truck: bool, allow_cop: bool) -> int:
+	var p_truck := OBS_PROB_TRUCK if allow_truck else 0.0
+	var p_cop   := (1.0 - OBS_PROB_GROUND - OBS_PROB_AERIAL - OBS_PROB_BUS - OBS_PROB_TRUCK) if allow_cop else 0.0
+	var scale: float = 1.0 / (OBS_PROB_GROUND + OBS_PROB_AERIAL + OBS_PROB_BUS + p_truck + p_cop)
+	var p_ground := OBS_PROB_GROUND * scale
+	var p_aerial := OBS_PROB_AERIAL * scale
+	var p_bus    := OBS_PROB_BUS    * scale
+	p_truck *= scale
+	var tr := _rng.randf()
+	if tr < p_ground:
+		return OBS_GROUND
+	elif tr < p_ground + p_aerial:
+		return OBS_AERIAL
+	elif tr < p_ground + p_aerial + p_bus:
+		return OBS_BUS
+	elif allow_truck and tr < p_ground + p_aerial + p_bus + p_truck:
+		return OBS_TRUCK
+	elif allow_cop:
+		return OBS_COP
+	else:
+		return OBS_GROUND   # resto por redondeo de floats: nunca cae acá en la práctica
+
+# Arma un grupo tirando el dado por obstáculo (como antes), sin ramp de dificultad.
+# Los camiones quedan afuera del sorteo salvo en trío: solitario y dúo son
+# obstáculos poco interesantes para lucir la rampa (ver rampa_carrera para eso,
+# y techos_bus, que no pasan por este sorteo). Se redistribuye su probabilidad
+# proporcionalmente entre el resto de los tipos, no se le regala a ninguno en particular.
+func _spawn_dice_group(group_size: int, x: float) -> float:
+	var allow_truck := group_size > 2
+	var allow_cop   := group_size == 1
+	var last_x := x
+	var last_w := 370.0
+	for i in range(group_size):
+		var obs_type := _roll_obstacle_type(allow_truck, allow_cop)
+
+		var local_idx: int
+		var body_w: float
+		match obs_type:
+			OBS_GROUND:
+				local_idx = _rng.randi() % FRAME_COUNT
+				body_w    = float(GROUND_BODY_W.get(local_idx, 370.0))
+			OBS_AERIAL:
+				local_idx = _rng.randi() % FRAME_COUNT_NEW
+				body_w    = float(AERIAL_BODY_W.get(local_idx, 347.0))
+			OBS_BUS:
+				local_idx = _rng.randi() % BUS_DATA.size()
+				body_w    = float(BUS_DATA[local_idx].cw) * BUS_SCALE
+			OBS_TRUCK:
+				local_idx = _rng.randi() % TRUCK_DATA.size()
+				body_w    = float(TRUCK_DATA[local_idx].cw) * TRUCK_SCALE
+			OBS_COP:
+				local_idx = 0
+				body_w    = COP_W
+			_:
+				local_idx = 0
+				body_w    = 370.0
+
+		_spawn_obstacle({"x": x, "type": obs_type, "frame": local_idx, "width": body_w})
+		last_x = x
+		last_w = body_w
+		if i < group_size - 1:
+			x += body_w + _rng.randf_range(INNER_GAP_MIN, INNER_GAP_MAX)
+
+	return last_x + last_w
+
+# ── Selección de la bolsa de prearmados ──────────────────────────────────────
+func _next_pattern_name() -> String:
+	if _pattern_bag.is_empty():
+		_pattern_bag = PATTERN_NAMES.duplicate()
+		_pattern_bag.shuffle()
+	return _pattern_bag.pop_front()
+
+func _spawn_pattern(pattern_name: String, x: float) -> float:
+	match pattern_name:
+		"rampa_carrera": return _spawn_rampa_carrera(x)
+		"techos_bus":    return _spawn_techos_bus(x)
+		"aereo_fakeout": return _spawn_aereo_fakeout(x)
+		_: return x
+
+# Camión-rampa + 3 autos pegados. El hueco camión→auto1 fuerza doble salto
+# (ver RAMPA_LAUNCH_GAP); los 3 autos van casi sin gap entre sí.
+func _spawn_rampa_carrera(x: float) -> float:
+	var truck_idx := _rng.randi() % TRUCK_DATA.size()
+	var truck_w: float = float(TRUCK_DATA[truck_idx].cw) * TRUCK_SCALE
+	_spawn_obstacle({"x": x, "type": OBS_TRUCK, "frame": truck_idx, "width": truck_w})
+	x += truck_w + RAMPA_LAUNCH_GAP
+
+	var last_x := x
+	var last_w := 370.0
+	for i in range(3):
+		var fi := _rng.randi() % FRAME_COUNT
+		var w: float = float(GROUND_BODY_W.get(fi, 370.0))
+		_spawn_obstacle({"x": x, "type": OBS_GROUND, "frame": fi, "width": w})
+		last_x = x
+		last_w = w
+		if i < 2:
+			x += w + RAMPA_CARS_GAP
+	return last_x + last_w
+
+# Auto aéreo (frame fijo, el más alto) + colectivo pegado. Una sola secuencia
+# salto→doble salto despeja el aéreo y aterriza en el techo del bus.
+func _spawn_aereo_fakeout(x: float) -> float:
+	var aerial_w: float = float(AERIAL_BODY_W.get(FAKEOUT_AERIAL_FRAME, 417.0))
+	_spawn_obstacle({"x": x, "type": OBS_AERIAL, "frame": FAKEOUT_AERIAL_FRAME, "width": aerial_w})
+	x += aerial_w + FAKEOUT_GAP
+
+	var bus_idx := _rng.randi() % BUS_DATA.size()
+	var bus_w: float = float(BUS_DATA[bus_idx].cw) * BUS_SCALE
+	_spawn_obstacle({"x": x, "type": OBS_BUS, "frame": bus_idx, "width": bus_w})
+	return x + bus_w
+
+# Cadena de colectivos/camiones para correr por los techos. En algunas de las
+# transiciones a nivel calle entre uno y el siguiente puede aparecer un auto
+# aéreo (bajás, lo esquivás con slide, volvés a subir).
+func _spawn_techos_bus(x: float) -> float:
+	var piece_count := _rng.randi_range(ROOFTOP_PIECE_MIN, ROOFTOP_PIECE_MAX)
+	var last_x := x
+	var last_w := 370.0
+	for i in range(piece_count):
+		var w: float
+		if _rng.randf() < ROOFTOP_TRUCK_CHANCE:
+			var ti := _rng.randi() % TRUCK_DATA.size()
+			w = float(TRUCK_DATA[ti].cw) * TRUCK_SCALE
+			_spawn_obstacle({"x": x, "type": OBS_TRUCK, "frame": ti, "width": w})
+		else:
+			var bi := _rng.randi() % BUS_DATA.size()
+			w = float(BUS_DATA[bi].cw) * BUS_SCALE
+			_spawn_obstacle({"x": x, "type": OBS_BUS, "frame": bi, "width": w})
+		last_x = x
+		last_w = w
+		if i < piece_count - 1:
+			if _rng.randf() < ROOFTOP_AERIAL_CHANCE:
+				var ai := _rng.randi() % FRAME_COUNT_NEW
+				var aw: float = float(AERIAL_BODY_W.get(ai, 347.0))
+				x += w + ROOFTOP_AERIAL_GAP_BEFORE
+				_spawn_obstacle({"x": x, "type": OBS_AERIAL, "frame": ai, "width": aw})
+				x += aw + ROOFTOP_AERIAL_GAP_AFTER
+			else:
+				x += w + _rng.randf_range(ROOFTOP_GAP_MIN, ROOFTOP_GAP_MAX)
+	return last_x + last_w
 
 func _cleanup_old(cam_x: float) -> void:
 	var cutoff := cam_x * parallax - CLEANUP_BEHIND

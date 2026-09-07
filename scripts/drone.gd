@@ -1,8 +1,15 @@
 extends Node2D
 
 @export var offset_y: float = -200.0
-@export var drone_speed: float = 700.0       # px/s — PP corre a 729; diferencia neta ~29px/s
-@export var max_escape_dist: float = 1600.0  # distancia de escape en px
+@export var drone_speed: float = 300.0       # px/s — tope de persecución. TEMPORAL PARA PRUEBAS: más
+											  # bajo que lo normal para que sea más fácil alejarse
+											  # (729-300=429px/s). Valor de referencia a restaurar
+											  # cuando terminen las pruebas: 633.0 (comentario original
+											  # abajo en separation_rate explica el porqué de 633).
+@export var separation_rate: float = 96.0    # = a lo que te alejás corriendo (729-drone_speed). Te
+											  # alcanza a separation_rate*0.1 = 9.6px/s (un décimo)
+											  # cuando frenás o te trabás
+@export var max_escape_dist: float = 4800.0  # distancia de escape en px (triple, para que el recorrido más largo venda más la sensación de velocidad al recuperar)
 @export var rest_offset: float = 120.0       # px a la izquierda del PP en reposo; cámara tiene +384 offset → PP aparece en x=256 desde borde izq
 @export var tilt_factor: float = 0.003
 @export var tilt_max: float = 0.25
@@ -12,6 +19,7 @@ extends Node2D
 var _target: Node2D
 var _anim: AnimatedSprite2D
 var _prev_x: float = 0.0
+var _target_prev_x: float = 0.0
 var _light_main: PointLight2D
 var _light_fill: PointLight2D
 var _light_red: PointLight2D
@@ -107,6 +115,7 @@ func _ready() -> void:
 	_light_fill.energy = 1.8
 	_light_fill.texture_scale = 18.0
 	_light_fill.z_index = -1
+	_light_fill.visible = false   # desactivada: solo quedan la roja y la azul
 	add_child(_light_fill)
 
 	_light_red = PointLight2D.new()
@@ -164,16 +173,31 @@ func _ready() -> void:
 	if _target:
 		global_position = Vector2(_target.global_position.x - rest_offset, _target.global_position.y + offset_y)
 		_prev_x = global_position.x
+		_target_prev_x = _target.global_position.x
 		_cone_x = _target.global_position.x
 
 func _process(delta: float) -> void:
 	if not _target: return
 	if escaped: return
 
-	# Persecución bidireccional: el dron mantiene rest_offset px a la izquierda del PP
+	# Persecución bidireccional: el dron mantiene rest_offset px a la izquierda del PP.
+	# La velocidad efectiva se deriva de la velocidad HORIZONTAL REAL del PP, medida
+	# por desplazamiento de posición cuadro a cuadro (no por CharacterBody2D.velocity):
+	# en una pendiente (rampa) la física redirige parte de esa velocidad hacia arriba
+	# para seguir la superficie, así que .velocity.x reportado baja aunque el PP siga
+	# corriendo a fondo — eso hacía que el dron "sintiera" que frenaste y te alcanzara
+	# de más en la rampa. Midiendo la posición nos independizamos de esa distorsión.
+	# A un décimo del ritmo (separation_rate*0.1) cuando el PP frena o se traba: te
+	# alcanza mucho más despacio que lo que te separás corriendo, sin golpe de
+	# velocidad tope inmediato. Mientras corrés, sigue igual (tope drone_speed).
+	# TODO post-pruebas: multiplicador a *4.0 (además de drone_speed=633 arriba).
+	var player_vx: float = maxf((_target.global_position.x - _target_prev_x) / delta, 0.0)
+	_target_prev_x = _target.global_position.x
+	var eff_speed: float = minf(drone_speed, player_vx + separation_rate * 0.1)
+
 	var rest_x := _target.global_position.x - rest_offset
 	var dir_x := rest_x - global_position.x
-	global_position.x += clampf(dir_x, -drone_speed * delta, drone_speed * delta)
+	global_position.x += clampf(dir_x, -eff_speed * delta, eff_speed * delta)
 
 	# Escape: si el PP logra alejarse max_escape_dist del dron
 	var gap := get_gap()

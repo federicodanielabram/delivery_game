@@ -80,7 +80,8 @@ func _place_vehicle(left_x: float) -> float:
 		sp.texture  = tex
 		sp.centered = false
 		sp.scale    = Vector2(sc, sc)
-		sp.z_index  = 2
+		sp.z_index  = 1   # por debajo de CarMidLayer (z=2): los cops (z=1, agregados después
+						  # en el árbol) tienen que dibujarse delante de esta línea de fondo
 		add_child(sp)
 		_objects.append({"cx": cx, "base_y": FLOOR_TOP_Y - th * sc * ratio, "sp": sp})
 		return left_x + w
@@ -97,7 +98,8 @@ func _place_vehicle(left_x: float) -> float:
 		sp.texture  = tex
 		sp.centered = false
 		sp.scale    = Vector2(sc, sc)
-		sp.z_index  = 2
+		sp.z_index  = 1   # por debajo de CarMidLayer (z=2): los cops (z=1, agregados después
+						  # en el árbol) tienen que dibujarse delante de esta línea de fondo
 		add_child(sp)
 		_objects.append({"cx": cx, "base_y": FLOOR_TOP_Y - th * sc, "sp": sp})
 		return left_x + w

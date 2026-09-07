@@ -7,7 +7,6 @@ const WAITER_DARK_SCENE  := preload("res://scenes/enemies/WaiterDark.tscn")
 const WAITER_LIGHT_SCENE := preload("res://scenes/enemies/WaiterLight.tscn")
 const HUD_SCENE          := preload("res://scenes/HUD.tscn")
 
-const LEVEL_LENGTH := 32000.0
 
 # ── Autos laterales (obstáculos plataforma) ──────────────────────────────────
 # Scale calculado: ancho intermedio entre traseros (195px) y frontales (910px)
@@ -22,18 +21,117 @@ const CAR_FLOOR_Y      := 730.0    # 50px más abajo que el piso del PP
 const CAR_SIDE_FRAMES  := 1        # cuántos frames tenemos por ahora (test)
 
 const NIGHT_ENEMY := Color(0.52, 0.47, 0.60)
+const NIGHT_PLAYER := Color(0.76, 0.70, 0.90)   # ver _ready() — mismo tinte que el PP (subido un poco)
+const BOSS_TINT_EXTRA := Color(0.7, 0.7, 0.7, 1.0)   # extra oscurecido — arte del boss es blanco, compensa
 
-const WAVE_TRIGGER_DIST := 500.0
-const WAVE_COUNT        := 3
+const _BOSS_STATE_IDLE     := 0   # State.IDLE en boss.gd
+const _BOSS_STATE_APPROACH := 1   # State.APPROACH en boss.gd
+
 const _WAITER_DEAD      := 4   # State.DEAD en waiter.gd
 
+# Capa de colisión exclusiva de las paredes invisibles de la arena (izq/der) —
+# nadie más la usa hoy. Solo el PP la tiene en su collision_mask (ver
+# _update_collision en player.gd), así que boss/mozos/cops la atraviesan.
+const WALL_LAYER := 16
+
+# ── DEBUG: saltar directo a la pizzeria ───────────────────────────────────────
+# Con esto en true, el nivel arranca como si ya hubieras escapado del dron
+# (mismo camino que el escape real — ver Drone.escaped en drone.gd y el chequeo
+# en _process): te ahorrás la persecución y llegás en PIZZERIA_RUNWAY px nomás,
+# para iterar rápido en la pelea del boss. Volver a false para el flujo normal.
+const DEBUG_SKIP_DRONE_CHASE := true
+
+# ── Mecánica: parar al boss/mozos con los pies apoyados en el piso ───────────
+# Boss y Waiter son CharacterBody2D SIN offset: su Sprite2D/AnimatedSprite2D y
+# su CollisionShape2D (una cápsula) están centrados en el origen del nodo. Eso
+# quiere decir que "position.y" es el CENTRO vertical de la cápsula, no los
+# pies — los pies (borde de ABAJO de su propia cápsula) están en
+# `position.y + altura_capsula/2`.
+#
+# El piso real es el nodo "Floor" (StaticBody2D, ver Game.tscn):
+#   position.y = 727.6 · shape (RectangleShape2D) height = 16
+#   → borde de ARRIBA del hitbox del piso = 727.6 - 16/2 = 719.6  (acá se para todo)
+#   → borde de abajo (enterrado)          = 727.6 + 16/2 = 735.6  (no se usa)
+#
+# Para que los pies (borde de abajo de SU cápsula) coincidan con el borde de
+# arriba del piso, despejamos position.y:
+#     pies == FLOOR_TOP_Y
+#     position.y + capsula_h/2 == FLOOR_TOP_Y
+#     position.y := FLOOR_TOP_Y - capsula_h/2
+const FLOOR_TOP_Y := 719.6   # borde de arriba del hitbox de "Floor" — Game.tscn
+
+const BOSS_CAPSULE_H   := 90.0   # NO es Boss.tscn → CapsuleShape2D.height (eso ahora es 240,
+								   # agrandada a pedido varias veces: +50px de ancho por lado,
+								   # +35px más hacia la derecha, +150px hacia arriba en total —
+								   # ver Boss.tscn/CollisionShape2D). Este valor es el doble de
+								   # la distancia real del centro del nodo al borde de ABAJO
+								   # (45px), que nunca se movió — todo el agrandado se hizo
+								   # asimétrico a propósito (corriendo el shape hacia arriba/
+								   # derecha) para no tocar dónde pisa. No cambiar sin recalcular.
+const WAITER_CAPSULE_H := 68.0   # Waiter/Dark/Light → CapsuleShape2D.height (las 3 comparten)
+
+const BOSS_LIFT_PX := 80.0    # ajuste manual pedido: el boss (hitbox) queda 80px más arriba que sus pies reales (100 - 20)
+
+const BOSS_FLOOR_Y   := FLOOR_TOP_Y - BOSS_CAPSULE_H   / 2.0 - BOSS_LIFT_PX  # = 574.6 (pies "reales" en 719.6, subido 80px)
+const WAITER_FLOOR_Y := FLOOR_TOP_Y - WAITER_CAPSULE_H / 2.0                 # = 685.6, pies en 719.6
+
 var _boss_node:      Node2D = null
-var _cam_limit       := 0.0
-var _wave_index      := 0
-var _wave_triggered  := false
-var _wave_enemies:   Array  = []
 var _floor_right_x:  float  = 32000.0
 var _left_wall:      AnimatableBody2D = null
+
+# Fin de nivel: escapar del dron dispara la pizzeria (ver _process/_trigger_pizzeria_ending)
+const PIZZERIA_RUNWAY := 5000.0   # px de "pista" corriendo después de escapar, antes de que aparezca
+const BOSS_SCREEN_POS := 0.80     # posición del boss en la pantalla final (0=izq, 1=der) — 20% del borde derecho
+var _escape_triggered  := false
+var _arrived_pizzeria  := false
+var _pizzeria_x        := 0.0     # borde izquierdo real del edificio de la pizzeria
+var _arena_left         := 0.0    # límites de la pantalla fija final (una sola pantalla, sin scroll)
+var _arena_right        := 0.0
+var _arena_seal_trigger_x := 0.0  # x de mundo donde hay que sellar sin salto (ver _trigger_pizzeria_ending)
+
+# Pausa de llegada: la cámara se traba de una al llegar (_seal_pizzeria_arena),
+# y el PP sigue corriendo con control normal hasta PLAYER_INTRO_SCREEN_POS de
+# esa pantalla ya fija — ahí, y solo ahí, se frena en seco y queda en IDLE
+# unos segundos (sonidos/talk acá) antes de que se libere. Los mozos ya
+# empiezan a entrar DURANTE este freeze (ver sistema de casilleros más abajo).
+const PLAYER_INTRO_SCREEN_POS := 0.20   # 20% del borde izquierdo, como pidió
+const INTRO_HOLD_DUR          := 3.2    # segundos en IDLE (2.2 + 1 pedido, para que entre tiempo la entrada escalonada)
+var _intro_target_x  := 0.0
+var _intro_pending   := false   # true entre "llegó a la arena" y "llegó al punto de frenada"
+var _intro_active    := false   # true mientras está frenado en IDLE (cuenta INTRO_HOLD_DUR)
+var _intro_timer     := 0.0
+
+# ── Mozos: sistema de 2 casilleros (izquierda/derecha) ───────────────────────
+# Nada de "oleadas" — cada costado mantiene como mucho un mozo vivo. Cuando se
+# vacía (muere, o todavía no entró nadie), arranca una pausa de
+# WAITER_RESPAWN_DELAY ("para respirar", pedido explícito) y recién ahí entra
+# el reemplazo, siempre por EL MISMO costado. Arranca durante el freeze de
+# _start_boss_intro: la derecha (atrás del boss) entra primero, la izquierda
+# WAITER_INITIAL_STAGGER después. Tope global de WAITER_TOTAL_CAP — una vez
+# alcanzado, los casilleros dejan de rellenarse (ahí es 1v1 con el boss).
+# Números en la línea de un beat-em-up clásico (Streets of Rage/Final Fight):
+# nunca más de 2 en pantalla, entran de a uno con respiro, total acotado antes
+# del boss real.
+const WAITER_TOTAL_CAP       := 8
+const WAITER_RESPAWN_DELAY   := 1.8   # pausa para respirar antes del reemplazo
+const WAITER_INITIAL_STAGGER := 1.0   # la izquierda arranca 1s después que la derecha
+var _waiter_slots_active   := false
+var _waiters_spawned_total := 0
+var _waiter_right:        Node  = null
+var _waiter_left:         Node  = null
+var _waiter_right_timer:  float = 0.0
+var _waiter_left_timer:   float = 0.0
+
+# El boss, durante el acercamiento, tiene que moverse al mismo ritmo que un
+# cop/auto de CarMidLayer (parallax=1.2, ver car_mid_layer.gd) — antes se
+# dibujaba en su x real (parallax=1, como el jugador), y eso lo hacía ver
+# "raro" respecto a los demás elementos de su mismo plano. _boss_base_x es su
+# referencia sin parallax; cada frame (mientras se acerca) se reposiciona con
+# la misma fórmula que usan cops/autos, compensada para que, en el instante
+# en que la cámara se traba, caiga exacto en _pizzeria_x (ver
+# _trigger_pizzeria_ending y el bloque en _process).
+const BOSS_PARALLAX := 1.2   # mismo valor que car_mid_layer.gd — "como un cop"
+var _boss_base_x := 0.0
 
 # Colores de obstáculos
 const COL_PLATFORM := Color(0.15, 0.15, 0.2,  1.0)
@@ -70,11 +168,19 @@ func _ready() -> void:
 
 	# Tinte nocturno en capas intermedias (el fondo lejano queda intacto)
 	var night := Color(0.40, 0.35, 0.50)
-	for path in ["MidScroll", "SidewalkScroll", "FloorScroll", "BuildingsLayer",
-				 "TrafficRearLayer", "TrafficFrontLayer"]:
+	for path in ["MidScroll", "SidewalkScroll", "FloorScroll", "TrafficFrontLayer"]:
 		var n := get_node_or_null(path)
 		if n:
 			n.modulate = night
+
+	# Edificios frontales y línea de tráfico de fondo (autos/motos detrás): bastante
+	# más oscuros que el resto (mismo matiz, la mitad de intensidad) para que
+	# PP/dron/obstáculos resalten más por contraste.
+	var buildings_night := Color(0.22, 0.20, 0.30)
+	for path in ["BuildingsLayer", "TrafficRearLayer"]:
+		var n2 := get_node_or_null(path)
+		if n2:
+			n2.modulate = buildings_night
 
 	# Las luces (drone, faroles) no afectan el fondo ni el humo
 	for path in ["BGScroll", "SmokeFar", "SmokeNear"]:
@@ -91,39 +197,45 @@ func _ready() -> void:
 			if child is CanvasItem:
 				(child as CanvasItem).light_mask = 2
 
-	var night_char := Color(0.72, 0.68, 0.82)
+	# Mismo tinte base que cop/autos/aéreos/buses/camiones (ver CarMidLayer más abajo
+	# y COP_TINT en car_mid_layer.gd) — probando a encontrar el nivel justo para
+	# todo el grupo "central" (PP + obstáculos), en tinte plano nada más (las luces
+	# dinámicas del dron/faroles quedan aparte).
 	var player := get_node_or_null("Player")
 	if player:
-		player.modulate = night_char
+		player.modulate = NIGHT_PLAYER
 
 	# Pared izquierda dinámica — empieza fuera de pantalla a la izquierda
 	_create_left_wall(-9999)
 
-	# Boss: desactivar completamente hasta que el drone escape
-	var boss_node := get_node_or_null("Boss")
-	if boss_node:
-		boss_node.process_mode = Node.PROCESS_MODE_DISABLED
-		if boss_node is CollisionObject2D:
-			(boss_node as CollisionObject2D).collision_layer = 0
-			(boss_node as CollisionObject2D).collision_mask  = 0
+	# Boss: desactivar completamente hasta que el drone escape (ver _trigger_pizzeria_ending)
+	_boss_node = get_node_or_null("Boss")
+	if _boss_node:
+		_boss_node.process_mode = Node.PROCESS_MODE_DISABLED
+		if _boss_node is CollisionObject2D:
+			(_boss_node as CollisionObject2D).collision_layer = 0
+			(_boss_node as CollisionObject2D).collision_mask  = 0
 
 	# HUD
 	var hud: Node = HUD_SCENE.instantiate()
 	add_child(hud)
 
-	#_boss_node = get_node_or_null("Boss")
+	# Modo infinito hasta escapar del dron — a partir de ahí, fin de nivel con
+	# la pizzeria (ver _trigger_pizzeria_ending, disparado desde _process()).
 
-	# Modo infinito: sin límite de cámara ni pared final
+	if DEBUG_SKIP_DRONE_CHASE:
+		var drone := get_node_or_null("Drone")
+		if drone:
+			drone.set("escaped", true)   # _process lo detecta al toque y dispara el escape real
 
 	# Capa de autos del medio (obstáculos/plataformas)
 	var mid_layer := Node2D.new()
 	mid_layer.set_script(load("res://scripts/car_mid_layer.gd"))
 	mid_layer.name = "CarMidLayer"
-	mid_layer.modulate = Color(0.55, 0.50, 0.65)
+	mid_layer.modulate = Color(0.66, 0.60, 0.78)
 	add_child(mid_layer)
 
 	# Colectivos y policías integrados en CarMidLayer
-	get_tree().debug_collisions_hint = true
 
 	# Mozos (tiran platos) repartidos a lo largo del nivel, antes del boss (~14600)
 	#_spawn_waiter(3000)
@@ -136,52 +248,33 @@ func _disable_lighting(node: Node) -> void:
 	for child in node.get_children():
 		_disable_lighting(child)
 
-func _set_camera_limit() -> void:
-	var player := get_tree().get_first_node_in_group("player") as Node2D
-	if not player: return
-	var cam := player.get_node_or_null("Camera2D") as Camera2D
-	if not cam: return
-	var bl := get_node_or_null("BuildingsLayer")
-	if bl:
-		var piz_base: float = bl.get("pizzeria_base_x")
-		const PIZ_W := 2172.0 * (266.0 / 724.0)   # ancho visual de la pizzeria ~798px
-		var half_vp := get_viewport().get_visible_rect().size.x * 0.5 / cam.zoom.x
-		# parallax 1.2: visual_pos = base - 0.2*cam  →  centrar: base + PIZ_W/2 = 1.2*cam
-		var limit := int((piz_base + PIZ_W * 0.5) / 1.2 + half_vp)
-		cam.limit_right = limit
-		_cam_limit = float(limit)
-		_create_right_wall(limit)
-		if _boss_node:
-			_boss_node.position = Vector2(_cam_limit - 550.0, 560.0)
-			_boss_node.visible  = true
-			(_boss_node as Node2D).modulate = NIGHT_ENEMY
-			var drone := get_node_or_null("Drone")
-			if drone:
-				drone.set("retreat_trigger_x", _boss_node.position.x - 300.0)
-		# Farol: oculta los que caen sobre la pizzeria, agrega uno sobre el edificio derecho
-		var sl := get_node_or_null("StreetlampLayer")
-		if sl:
-			var right_building_x := piz_base + PIZ_W - 35.0
-			sl.call("finalize_for_pizzeria", piz_base - 100.0, piz_base + PIZ_W + 100.0, right_building_x)
-	else:
-		cam.limit_right = int(LEVEL_LENGTH)
-		_create_right_wall(int(LEVEL_LENGTH))
-
 func _extend_floor() -> void:
 	const SEG_W := 32000.0
+	# SEG_OVERLAP: el segmento nuevo arranca un poco ANTES de _floor_right_x en
+	# vez de justo ahí, para solapar con el anterior (el del .tscn incluido).
+	# Dos StaticBody2D tocándose borde a borde exacto generan un enganche
+	# invisible en la costura (bug físico conocido de Godot) — el jugador se
+	# frena ahí como si hubiera una pared, aunque no hay ninguna shape de más.
+	const SEG_OVERLAP := 64.0
+	var seg_left  := _floor_right_x - SEG_OVERLAP
+	var seg_width := SEG_W + SEG_OVERLAP
 	var body := StaticBody2D.new()
-	body.position = Vector2(_floor_right_x + SEG_W * 0.5, 727.6)
+	body.position = Vector2(seg_left + seg_width * 0.5, 727.6)
 	var col   := CollisionShape2D.new()
 	var shape := RectangleShape2D.new()
-	shape.size = Vector2(SEG_W, 16.0)
+	shape.size = Vector2(seg_width, 16.0)
 	col.shape  = shape
 	body.add_child(col)
 	add_child(body)
+	print("[floor] nuevo segmento %.0f → %.0f" % [seg_left, seg_left + seg_width])  # DEBUG temporal
 	_floor_right_x += SEG_W
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	var cam := get_viewport().get_camera_2d()
-	if cam and _left_wall:
+	# Una vez encerrado en la pizzeria, esto se congela — _seal_pizzeria_arena ya
+	# dejó cam.limit_left fijo, y este bloque (pensado para el modo infinito, sigue
+	# al jugador hacia adelante) lo volvería a correr cada frame si no se lo frena.
+	if cam and _left_wall and not _arrived_pizzeria:
 		var half_vp  := get_viewport().get_visible_rect().size.x * 0.5 / cam.zoom.x
 		# Usar posición del player (no de la cámara) para evitar feedback loop con limit_left.
 		var player_node := get_tree().get_first_node_in_group("player") as Node2D
@@ -193,50 +286,275 @@ func _process(_delta: float) -> void:
 	var player := get_tree().get_first_node_in_group("player") as Node2D
 	if player and player.global_position.x > _floor_right_x - 5000.0:
 		_extend_floor()
-	if not player or not _boss_node:
-		return
-	if not _wave_triggered:
-		if player.global_position.x >= _boss_node.global_position.x - WAVE_TRIGGER_DIST:
-			_wave_triggered = true
-			_spawn_wave()
-		return
-	if _wave_index >= WAVE_COUNT or _wave_enemies.is_empty():
-		return
-	var all_dead := true
-	for e in _wave_enemies:
-		if is_instance_valid(e) and e.get("state") != _WAITER_DEAD:
-			all_dead = false
-			break
-	if all_dead:
-		_spawn_wave()
 
-func _spawn_wave() -> void:
-	_wave_index += 1
-	_wave_enemies.clear()
-	_wave_enemies.append(_spawn_wave_waiter(_boss_node.global_position.x - 1400.0, 600.0))
-	_wave_enemies.append(_spawn_wave_waiter(_cam_limit - 50.0, 600.0))
+	# Escapar del dron termina el modo infinito: la pizzeria aparece de forma
+	# orgánica unos pasos más adelante (mismo mecanismo de generación anticipada
+	# que usa todo lo demás — no es un corte ni un teletransporte).
+	if not _escape_triggered and player:
+		var drone := get_node_or_null("Drone")
+		if drone and drone.get("escaped") == true:
+			_escape_triggered = true
+			_trigger_pizzeria_ending(player.global_position.x, player.global_position.x + PIZZERIA_RUNWAY)
 
-func _spawn_wave_waiter(x: float, y: float) -> Node:
+	# El boss se reposiciona cada frame al mismo ritmo que un cop (parallax=1.2)
+	# — ver _boss_base_x en _trigger_pizzeria_ending. Esto sigue haciendo falta
+	# INCLUSO después de llegar: con el margen de cámara nuevo (ver
+	# _seal_pizzeria_arena) la cámara puede seguir moviéndose un poco dentro de
+	# la arena, y si dejáramos de tocar al boss ahí se desincroniza del
+	# parallax de la pizzeria/edificios (mismo bug que ya resolvimos una vez).
+	# boss.gd mantiene al boss FIJO (velocity.x=0) en IDLE y APPROACH — no pisa
+	# nada tocar su position.x en esos dos estados. Recién en combate de verdad
+	# (ATTACK/KICK/HURT — con knockback real) soltamos del todo y manda su IA.
+	if _escape_triggered and _boss_node and cam \
+			and _boss_node.get("state") in [_BOSS_STATE_IDLE, _BOSS_STATE_APPROACH]:
+		var boss_cam_x := cam.get_screen_center_position().x
+		_boss_node.position.x = _boss_base_x + boss_cam_x * (1.0 - BOSS_PARALLAX)
+
+	# "Llegar" = el momento en que lo que YA se ve en pantalla (cámara libre,
+	# con su offset de adelanto) coincide con el centro de la arena — NO
+	# cuando el PP cruza _arena_left en x de mundo crudo (ver
+	# _arena_seal_trigger_x en _trigger_pizzeria_ending para el porqué).
+	if _escape_triggered and not _arrived_pizzeria and player \
+			and player.global_position.x >= _arena_seal_trigger_x:
+		_arrived_pizzeria = true
+		_seal_pizzeria_arena()
+
+	# Sigue corriendo (ya en la pantalla fija) hasta el punto de frenada — ahí
+	# lo clavamos en IDLE y arranca la pausa de intro.
+	if _intro_pending and player and player.global_position.x >= _intro_target_x:
+		_intro_pending = false
+		_start_boss_intro(player)
+
+	if _intro_active:
+		_intro_timer -= delta
+		if _intro_timer <= 0.0:
+			_intro_active = false
+			if player:
+				player.call("set_cutscene_lock", false)
+
+	# Casilleros de mozos — arrancan en _start_boss_intro (durante el freeze) y
+	# siguen andando solos por el resto de la pelea, hasta WAITER_TOTAL_CAP.
+	if _waiter_slots_active:
+		_tick_waiter_slots(delta)
+
+	# DEBUG temporal — confirma si la cámara realmente sigue moviéndose después de encerrar.
+	if _arrived_pizzeria and player and Engine.get_physics_frames() % 30 == 0:
+		var dcam := get_viewport().get_camera_2d()
+		if dcam:
+			print("[pizzeria] player.x=%.0f cam_center=%.0f limit_right=%s" \
+				% [player.global_position.x, dcam.get_screen_center_position().x, str(dcam.limit_right)])
+
+# Se dispara una sola vez, apenas el dron marca escaped=true. El boss y el
+# edificio de la pizzeria van en el MISMO punto (anchor_x) — ahí termina el
+# mundo: nada se genera más allá (ni edificios comunes, ni tráfico). La
+# pantalla fija final se arma hacia atrás desde ese punto, de manera que el
+# boss quede a BOSS_SCREEN_POS del ancho de esa pantalla. La cámara todavía NO
+# se traba acá — eso pasa recién al llegar (_seal_pizzeria_arena), para no
+# cortar la pista de antemano.
+#
+# escape_x: dónde estaba el jugador justo al escapar del dron. A partir de ahí
+# no se generan más obstáculos (autos/cops/aéreos) — la pista de PIZZERIA_RUNWAY
+# px se corre limpia. Los edificios y el tráfico de fondo, en cambio, siguen
+# generándose hasta anchor_x (ahí sí frenan) para que el fondo no se sienta vacío.
+func _trigger_pizzeria_ending(escape_x: float, anchor_x: float) -> void:
+	_pizzeria_x = anchor_x
+
+	var half_vp := 600.0
+	var cam := get_viewport().get_camera_2d()
+	if cam:
+		half_vp = get_viewport().get_visible_rect().size.x * 0.5 / cam.zoom.x
+	var vp_w := half_vp * 2.0
+	_arena_right = _pizzeria_x + (1.0 - BOSS_SCREEN_POS) * vp_w
+	_arena_left  = _arena_right - vp_w
+
+	# Punto real donde hay que sellar (NO _arena_left) — medido con logs reales:
+	# la cámara sigue al jugador con offset.x=384 de "adelanto" (mira más
+	# adelante que el PP), así que lo que se ve en pantalla ANTES de sellar es
+	# player.x + offset.x, no player.x a secas. Si sellamos recién al cruzar
+	# _arena_left (en x de mundo crudo), la pantalla todavía no está mostrando
+	# el centro de la arena — y Godot, al fijar límites del ancho exacto del
+	# viewport, fuerza la cámara a ese centro de golpe: salto de ~249px en un
+	# frame (confirmado con print de cam.position/screen_center antes/después).
+	# Sellando en este punto en cambio, lo que ya se ve YA es el centro de la
+	# arena — sellar pasa a ser un no-op visual, cero salto.
+	var arena_center := (_arena_left + _arena_right) * 0.5
+	var cam_offset_x := cam.offset.x if cam else 0.0
+	_arena_seal_trigger_x = arena_center - cam_offset_x
+
+	print("[pizzeria] escape trigger — boss/pizzeria=%.0f arena=[%.0f, %.0f] seal_trigger=%.0f" \
+		% [_pizzeria_x, _arena_left, _arena_right, _arena_seal_trigger_x])  # DEBUG temporal
+
+	# El boss se mueve como un cop mientras se acerca (ver bloque en _process,
+	# BOSS_PARALLAX=1.2). Acá se calcula su "base" sin parallax, compensada
+	# para que en el instante en que la cámara se traba (cam_x == arena_center,
+	# constante de ahí en más) el resultado caiga EXACTO en _pizzeria_x:
+	#   render_x = base_x + arena_center*(1-parallax)  →  despejando:
+	#   base_x   = _pizzeria_x - arena_center*(1-parallax)
+	_boss_base_x = _pizzeria_x - arena_center * (1.0 - BOSS_PARALLAX)
+
+	# El edificio de la pizzeria queda centrado en la PANTALLA (arena_center,
+	# 50%), no en el boss (que está al 80%) — quedan desacoplados a propósito.
+	# Para que el fondo no se sienta cortado, los edificios comunes generan
+	# SIN hueco hasta llegar a la pizzeria, y siguen 3 edificios más después de
+	# ella (hacia donde está el boss) antes de cortar la generación del todo.
+	var piz_left  := _pizzeria_x
+	var piz_right := _pizzeria_x
+	const BUILDINGS_AFTER_PIZZERIA := 3
+	var buildings := get_node_or_null("BuildingsLayer")
+	if buildings:
+		# La pizzeria queda dentro del sistema de parallax normal de la capa
+		# (misma velocidad que cualquier edificio frontal, parallax=1.2) — no
+		# es un caso especial. Se la compensa con la misma fórmula de siempre,
+		# pero apuntando a arena_center (el centro de pantalla) en vez de a
+		# _pizzeria_x: render_x = base_x + arena_center*(1-parallax), y
+		# queremos render_x == arena_center → base_x = arena_center*parallax.
+		var piz_parallax: float = buildings.get("parallax")
+		var piz_spawn_x := arena_center * piz_parallax
+		buildings.call("fill_to", piz_spawn_x)   # sin hueco antes de la pizzeria
+		piz_right = buildings.call("spawn_pizzeria", piz_spawn_x)
+		piz_left  = buildings.get("pizzeria_base_x")
+		var after_right: float = buildings.call("spawn_n_buildings", piz_right, BUILDINGS_AFTER_PIZZERIA)
+		buildings.call("stop_at", after_right)
+
+	# Obstáculos (autos/cops/aéreos): cortan YA, en escape_x — la pista final es
+	# sin obstáculos, solo corrés. El tráfico de fondo (cosmético) sigue hasta
+	# _pizzeria_x junto con los edificios, para que no se vea vacío atrás.
+	var mid_layer := get_node_or_null("CarMidLayer")
+	if mid_layer: mid_layer.call("stop_at", escape_x)
+	var traffic_rear := get_node_or_null("TrafficRearLayer")
+	if traffic_rear: traffic_rear.call("stop_at", _pizzeria_x)
+
+	# Farol: oculta los que caen sobre la pizzeria, agrega uno sobre el borde derecho
+	var sl := get_node_or_null("StreetlampLayer")
+	if sl:
+		sl.call("finalize_for_pizzeria", piz_left - 100.0, piz_right + 100.0, piz_right - 35.0)
+
+	if _boss_node:
+		_boss_node.position     = Vector2(_pizzeria_x, BOSS_FLOOR_Y)
+		_boss_node.visible      = true
+		_boss_node.process_mode = Node.PROCESS_MODE_INHERIT
+		if _boss_node is CollisionObject2D:
+			(_boss_node as CollisionObject2D).collision_layer = 4
+			(_boss_node as CollisionObject2D).collision_mask  = 1
+		# El final boss tiene que verse como el PP en luz — mismo light_mask
+		# por defecto (=1, sin tocar) para que reaccione a faroles y demás
+		# luces dinámicas igual que el jugador. El tinte NO alcanza con ser
+		# igual al del PP (NIGHT_PLAYER) nomás: el arte del boss es delantal
+		# BLANCO con sangre — mucho blanco puro, que bajo el mismo multiplicador
+		# queda mucho más luminoso que la capucha roja/oscura del PP. Hay que
+		# exagerar el oscurecido específicamente para él para que el resultado
+		# final se sienta parejo. BOSS_TINT_EXTRA es ese extra, multiplicado
+		# encima de NIGHT_PLAYER.
+		_boss_node.modulate = NIGHT_PLAYER * BOSS_TINT_EXTRA
+
+# Se dispara cuando el jugador llega físicamente al borde de la pantalla final
+# (no al escapar, eso fue PIZZERIA_RUNWAY px antes) — recién ahí se traba la
+# cámara y el PP sigue corriendo control normal hasta su punto de frenada (ver
+# _intro_pending en _process).
+#
+# La caja de límites NO es exacta al ancho del viewport a propósito — le
+# dejamos un margen de CAMERA_MARGIN_FRAC (1/4 de pantalla, repartido mitad a
+# cada lado) de más. Godot solo fuerza el centrado automático cuando la caja
+# mide EXACTO el ancho del viewport (o menos) — con esta caja más ancha, la
+# cámara vuelve a tener grados de libertad reales y sigue al PP normal dentro
+# de ese rango (nada de suavizado todavía, eso queda pendiente). Las paredes
+# físicas se corren para que el PP pueda realmente llegar hasta ahí — si no,
+# el margen de cámara quedaría inútil, sin nadie que lo alcance caminando.
+const CAMERA_MARGIN_FRAC := 0.25
+
+func _seal_pizzeria_arena() -> void:
+	var vp_w   := _arena_right - _arena_left
+	var margin := vp_w * CAMERA_MARGIN_FRAC * 0.5   # mitad para cada lado
+
+	if _left_wall:
+		_left_wall.global_position.x = maxf(_left_wall.global_position.x, _arena_left - margin)
+	var cam := get_viewport().get_camera_2d()
+	if cam:
+		# Mismo ajuste de offset que ya usa la pared izquierda de siempre más arriba.
+		cam.limit_left  = int(_arena_left  - margin) - int(cam.offset.x)
+		cam.limit_right = int(_arena_right + margin) - int(cam.offset.x)
+	_create_right_wall(int(_arena_right + margin) + 20)
+	print("[pizzeria] arrival — arena=[%.0f, %.0f] margin=%.0f limit_left=%s limit_right=%s" \
+		% [_arena_left, _arena_right, margin, str(cam.limit_left if cam else "?"), str(cam.limit_right if cam else "?")])  # DEBUG temporal
+
+	_intro_target_x = _arena_left + (_arena_right - _arena_left) * PLAYER_INTRO_SCREEN_POS
+	_intro_pending  = true
+
+# Frena al PP en seco al llegar a _intro_target_x y lo deja en IDLE — acá
+# arrancan también los casilleros de mozos (entran DURANTE este freeze, no
+# después). El de la derecha (atrás del boss) ya, el de la izquierda un toque
+# más tarde (WAITER_INITIAL_STAGGER).
+func _start_boss_intro(player: Node2D) -> void:
+	player.global_position.x = _intro_target_x
+	player.call("set_cutscene_lock", true)
+	_intro_active = true
+	_intro_timer  = INTRO_HOLD_DUR
+	_play_boss_intro_sfx()
+
+	_waiter_slots_active   = true
+	_waiters_spawned_total = 0
+	_waiter_right          = null
+	_waiter_left           = null
+	_waiter_right_timer    = 0.0                     # entra casi al toque
+	_waiter_left_timer     = WAITER_INITIAL_STAGGER   # entra un poco después
+
+	print("[pizzeria] intro — PP frenado en x=%.0f, %.1fs de hold, mozos ya arrancando" \
+		% [_intro_target_x, INTRO_HOLD_DUR])  # DEBUG temporal
+
+# TODO: no hay assets de audio todavía (assets/audio/ está vacío) — acá va el
+# "talk" del boss / grito del PP cuando los tengamos. Placeholder a propósito.
+func _play_boss_intro_sfx() -> void:
+	pass
+
+# Un tick de los dos casilleros — ver comentario junto a las variables
+# _waiter_*. Sin abstraer en un loop a propósito: son solo dos, y así queda
+# clarísimo qué hace cada lado con solo mirarlo.
+func _tick_waiter_slots(delta: float) -> void:
+	if _waiter_right and (not is_instance_valid(_waiter_right) or _waiter_right.get("state") == _WAITER_DEAD):
+		_waiter_right       = null
+		_waiter_right_timer = WAITER_RESPAWN_DELAY
+	if _waiter_right == null and _waiters_spawned_total < WAITER_TOTAL_CAP:
+		_waiter_right_timer -= delta
+		if _waiter_right_timer <= 0.0:
+			_waiter_right = _spawn_side_waiter(true)
+			_waiters_spawned_total += 1
+
+	if _waiter_left and (not is_instance_valid(_waiter_left) or _waiter_left.get("state") == _WAITER_DEAD):
+		_waiter_left       = null
+		_waiter_left_timer = WAITER_RESPAWN_DELAY
+	if _waiter_left == null and _waiters_spawned_total < WAITER_TOTAL_CAP:
+		_waiter_left_timer -= delta
+		if _waiter_left_timer <= 0.0:
+			_waiter_left = _spawn_side_waiter(false)
+			_waiters_spawned_total += 1
+
+# is_right=true entra desde afuera del borde derecho (atrás del boss);
+# is_right=false desde afuera del borde izquierdo.
+func _spawn_side_waiter(is_right: bool) -> Node:
+	var arena_w := _arena_right - _arena_left
+	var enter_x  := _arena_right + 220.0 if is_right else _arena_left - 220.0
+	var target_x := _arena_left + arena_w * (0.90 if is_right else 0.30)
 	var scenes := [WAITER_SCENE, WAITER_DARK_SCENE, WAITER_LIGHT_SCENE]
 	var waiter: Node = scenes[randi() % scenes.size()].instantiate()
-	(waiter as Node2D).position = Vector2(x, y)
+	(waiter as Node2D).position = Vector2(enter_x, WAITER_FLOOR_Y)
 	(waiter as Node2D).modulate = NIGHT_ENEMY
 	add_child(waiter)
+	waiter.call("start_entrance", target_x)
 	return waiter
 
 func _spawn_waiter(x: float) -> void:
 	var waiter: Node = WAITER_SCENE.instantiate()
-	(waiter as Node2D).position = Vector2(x, 600.0)
+	(waiter as Node2D).position = Vector2(x, WAITER_FLOOR_Y)
 	add_child(waiter)
 
 func _spawn_waiter_dark(x: float) -> void:
 	var waiter: Node = WAITER_DARK_SCENE.instantiate()
-	(waiter as Node2D).position = Vector2(x, 600.0)
+	(waiter as Node2D).position = Vector2(x, WAITER_FLOOR_Y)
 	add_child(waiter)
 
 func _spawn_waiter_light(x: float) -> void:
 	var waiter: Node = WAITER_LIGHT_SCENE.instantiate()
-	(waiter as Node2D).position = Vector2(x, 600.0)
+	(waiter as Node2D).position = Vector2(x, WAITER_FLOOR_Y)
 	add_child(waiter)
 
 func _spawn_cop(x: float) -> void:
@@ -370,6 +688,11 @@ func _create_left_wall(x: int) -> void:
 	shape.size = Vector2(32.0, 1200.0)
 	col.shape  = shape
 	wall.add_child(col)
+	# Capa exclusiva (ver WALL_LAYER) — para que solo el PP choque contra esto.
+	# Mozos/boss/cops nunca la incluyen en su collision_mask, así que la
+	# atraviesan libremente.
+	wall.collision_layer = WALL_LAYER
+	wall.collision_mask  = 0
 	add_child(wall)
 	_left_wall = wall
 
@@ -382,6 +705,8 @@ func _create_right_wall(x: int) -> void:
 	shape.size = Vector2(32.0, 1200.0)
 	col.shape  = shape
 	wall.add_child(col)
+	wall.collision_layer = WALL_LAYER
+	wall.collision_mask  = 0
 	add_child(wall)
 
 # ── Puerta (obstacle: golpear con Z) ────────────────────────────────────────

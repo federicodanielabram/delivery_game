@@ -1,9 +1,8 @@
 extends CharacterBody2D
 
 const GRAVITY        := 850.0
-const PARALLAX       := 1.275
+const PARALLAX       := 1.2   # tiene que matchear el parallax de car_mid_layer.gd
 const MAX_HP         := 8
-const MOVE_SPEED     := 75.0
 const DETECT_RANGE   := 900.0
 const ATTACK_RANGE   := 100.0
 const ATTACK_CDN     := 2.2
@@ -46,6 +45,7 @@ var obstacle_mode: bool = false
 var hp_bar_node:   Node2D = null
 var hp_bar_blocks: Array  = []
 var _shadow: Sprite2D = null
+var _contact_area: Area2D = null
 
 @onready var sprite:    AnimatedSprite2D = $AnimatedSprite2D
 @onready var collision: CollisionShape2D = $CollisionShape2D
@@ -53,33 +53,79 @@ var _shadow: Sprite2D = null
 func _ready() -> void:
 	collision_layer = 4
 	collision_mask  = 1
-	z_index = 2
+	# z_index=1: por debajo de los autos/buses/camiones de CarMidLayer (z=2). El
+	# cop se agrega como hermano de esa capa, no hijo, así que a igual z_index
+	# Godot lo dibuja siempre encima (se agregó después al árbol) — esto evita
+	# que un cop que quede rozando un vehículo se vea incrustado/tapándolo.
+	z_index = 1
 	add_to_group("enemy")
 	add_to_group("cop")
 	patrol_origin = global_position
 	_load_sprites()
 	_build_hp_bar()
 	_create_shadow()
+	_create_contact_hitbox()
 	call_deferred("_find_player")
 	sprite.animation_finished.connect(_on_animation_finished)
 
+# Hitbox de contacto — un Area2D aparte del CollisionShape2D de combate, del
+# tamaño real del cuerpo. Se dispara si el jugador lo toca sin haberlo resuelto
+# antes con slide/salto+patada (esos ya lo matan al tocarlo, con su propio
+# rango — ver SLIDE_RANGE / FLYING_KICK_RANGE en player.gd). Si no lo resolvés,
+# el bloqueo físico de verdad (que te frena como un colectivo) es aparte, vía
+# collision_mask en player.gd — esta área solo se encarga de restarte la vida.
+func _create_contact_hitbox() -> void:
+	_contact_area = Area2D.new()
+	_contact_area.collision_layer = 0
+	_contact_area.collision_mask  = 2   # layer 2 = jugador (ver Player.tscn)
+	var col := CollisionShape2D.new()
+	var shape := RectangleShape2D.new()
+	shape.size = Vector2(70.0, 130.0)   # ancho real del cuerpo, no el rango de ataque
+	col.shape = shape
+	col.position = Vector2(0, 23.8)
+	_contact_area.add_child(col)
+	_contact_area.body_entered.connect(_on_contact_body_entered)
+	add_child(_contact_area)
+
+func _on_contact_body_entered(body: Node) -> void:
+	if state == State.DEAD: return
+	if not obstacle_mode: return
+	# Lo chocaste de lleno corriendo, sin resolverlo con slide/salto+patada a
+	# tiempo (esos matan al cop mucho antes de llegar a esta distancia). Sin
+	# knockback: la colisión física (ver collision_mask en player.gd) ya te
+	# frena en seco como un colectivo — esto solo resta la vida, sin empujón
+	# de por medio, y sin esperar la animación lenta de ataque del cop.
+	if body.is_in_group("player") and body.has_method("take_damage"):
+		body.call("take_damage", 1, facing_right, 0.0)
+
+# Misma mancha plana que usan los autos aéreos y el PP (ver player.gd) — el cop
+# nunca cambia de altura, así que no hace falta el sistema dinámico del PP, solo
+# se ancla una vez con los mismos valores de tamaño/opacidad ya afinados.
+const SHADOW_TEX_PATH     := "res://assets/sprites/cars/side_test/car_side_06 - copia.png"
+const SHADOW_TEX_W        := 1424.0
+const SHADOW_TEX_H        := 642.0
+const SHADOW_SCALE        := 0.10
+const SHADOW_WIDTH_TRIM   := 34.0   # 17 de cada lado
+# Bordes explícitos (arriba/abajo) en vez de "punto de apoyo + boost" — así
+# crecer para un lado o mover todo junto son dos cosas separadas y sin ambigüedad.
+# Partiendo de los pies reales del sprite (canvas 256px, sprite.position=(0,-30),
+# scale=1.1) en ~84, con +10 hacia abajo, +15 hacia abajo, +20 hacia abajo (alto)
+# y +15 hacia abajo (mover) acumulados.
+const SHADOW_TOP_Y        := -66.2
+const SHADOW_BOTTOM_Y     := 103.0
+const SHADOW_X_OFFSET     := -7.0    # negativo = izquierda
+const SHADOW_ALPHA        := 0.68
+
 func _create_shadow() -> void:
 	_shadow = Sprite2D.new()
-	_shadow.z_index = -1
-	var w := 90
-	var h := 28
-	var img := Image.create(w, h, false, Image.FORMAT_RGBA8)
-	var cx := w * 0.5
-	var cy := h * 0.5
-	for x in range(w):
-		for y in range(h):
-			var dx := (x - cx) / cx
-			var dy := (y - cy) / cy
-			var a := clampf(1.0 - sqrt(dx * dx + dy * dy), 0.0, 1.0)
-			img.set_pixel(x, y, Color(0.0, 0.0, 0.0, a))
-	_shadow.texture = ImageTexture.create_from_image(img)
-	_shadow.position = Vector2(0, 30)
-	_shadow.modulate.a = 0.45
+	_shadow.z_index  = -1
+	_shadow.centered = false
+	_shadow.texture  = load(SHADOW_TEX_PATH)
+	var sx := SHADOW_SCALE - SHADOW_WIDTH_TRIM / SHADOW_TEX_W
+	var sy := (SHADOW_BOTTOM_Y - SHADOW_TOP_Y) / SHADOW_TEX_H
+	_shadow.scale      = Vector2(sx, sy)
+	_shadow.position   = Vector2(-SHADOW_TEX_W * sx * 0.5 + SHADOW_X_OFFSET, SHADOW_TOP_Y)
+	_shadow.modulate.a = SHADOW_ALPHA
 	add_child(_shadow)
 	move_child(_shadow, 0)
 
@@ -93,7 +139,7 @@ func _load_sprites() -> void:
 	frames.add_animation("idle")
 	frames.set_animation_loop("idle", true)
 	frames.set_animation_speed("idle", 1.0)
-	var idle_tex := load(BASE + "/walk/cop__001.png") as Texture2D
+	var idle_tex := load(BASE + "/attack/cop__001.png") as Texture2D
 	if idle_tex: frames.add_frame("idle", idle_tex)
 
 	frames.add_animation("walk_start")
@@ -185,17 +231,6 @@ func _physics_process(delta: float) -> void:
 			_parallax_base_x = global_position.x - cam_x * (1.0 - PARALLAX)
 		return
 
-	if obstacle_mode:
-		velocity.x = 0.0
-		if not is_on_floor():
-			velocity.y += GRAVITY * delta
-		else:
-			velocity.y = 0.0
-		if sprite.animation != "idle":
-			sprite.play("idle")
-		move_and_slide()
-		return
-
 	if not is_on_floor():
 		velocity.y += GRAVITY * delta
 
@@ -209,7 +244,12 @@ func _physics_process(delta: float) -> void:
 		State.HURT:   _do_hurt(delta)
 
 	sprite.flip_h = facing_right
-	if state == State.ATTACK:
+	_update_walk_anim()   # actualiza sprite.animation ANTES de decidir el offset,
+						   # así quedan sincronizados en el mismo tick (evita el
+						   # salto de 1 frame al pasar de attack a idle)
+	if state == State.ATTACK or sprite.animation == "idle":
+		# idle usa el frame 01 del sheet de attack → mismo offset que attack,
+		# no el de walk (evita el salto al volver de atacar a idle)
 		var attack_x := 17.0 if not facing_right else -17.0
 		sprite.position.x = attack_x
 	elif sprite.animation == "walk_start":
@@ -221,7 +261,6 @@ func _physics_process(delta: float) -> void:
 		sprite.position.x = lerpf(idle_x, walk_x, t)
 	else:
 		sprite.position.x = 45.0 if not facing_right else -35.0
-	_update_walk_anim()
 	move_and_slide()
 	if _cam_ready:
 		_parallax_base_x = global_position.x - cam_x * (1.0 - PARALLAX)
@@ -264,17 +303,13 @@ func _do_alert(delta: float) -> void:
 		return
 	facing_right = player.global_position.x > global_position.x
 	var dist := _player_dist()
-	if dist <= ATTACK_RANGE and _is_on_screen():
-		velocity.x = move_toward(velocity.x, 0.0, 400.0 * delta)
-		if attack_timer <= 0.0:
-			state = State.ATTACK
-			walk_phase = WalkPhase.IDLE
-			_attack_hit_done = false
-			z_index = 3
-			sprite.play("attack")
-	else:
-		var dir := signf(player.global_position.x - global_position.x)
-		velocity.x = move_toward(velocity.x, dir * MOVE_SPEED, 250.0 * delta)
+	velocity.x = move_toward(velocity.x, 0.0, 400.0 * delta)
+	if dist <= ATTACK_RANGE and _is_on_screen() and attack_timer <= 0.0:
+		state = State.ATTACK
+		walk_phase = WalkPhase.IDLE
+		_attack_hit_done = false
+		z_index = 2   # se destaca al atacar, pero sigue sin superar a los vehículos (z=2, empate)
+		sprite.play("attack")
 
 func _do_attack(delta: float) -> void:
 	velocity.x = 0.0
@@ -302,9 +337,9 @@ func _on_animation_finished() -> void:
 		"walk_end":
 			walk_phase = WalkPhase.IDLE
 		"attack":
-			z_index = 2
+			z_index = 1
 			attack_timer = 0.0
-			walk_phase = WalkPhase.STOPPING
+			walk_phase = WalkPhase.IDLE
 			state = State.ALERT if (player and _player_dist() <= DETECT_RANGE * 1.5) else State.PATROL
 		"hurt":
 			state = State.ALERT if (player and _player_dist() <= DETECT_RANGE * 1.5) else State.PATROL
@@ -342,7 +377,8 @@ func take_weakness_damage(from_right: bool) -> void:
 func _die() -> void:
 	state = State.DEAD
 	walk_phase = WalkPhase.IDLE
-	z_index = 2
+	z_index = 1
 	collision.set_deferred("disabled", true)
+	if _contact_area: _contact_area.set_deferred("monitoring", false)
 	if _shadow: _shadow.visible = false
 	sprite.play("death")

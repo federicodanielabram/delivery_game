@@ -1,7 +1,7 @@
 extends Node2D
 
 @export var parallax: float = 1.2
-@export var puddle_count: int = 40
+@export var puddle_count: int = 16
 @export var scale_min: float = 0.22
 @export var scale_max: float = 0.45
 @export var alpha: float = 0.75
@@ -13,6 +13,7 @@ const COLS: int = 3
 const ROWS: int = 4
 const FRAME_W: int = 341
 const FRAME_H: int = 256
+const MIN_GAP: float = 300.0   # separación mínima centro-a-centro: evita que se encimen
 
 var _base_x: Array = []
 var _sprites: Array = []
@@ -39,7 +40,7 @@ func _ready() -> void:
 		sp.texture = atlas
 		sp.centered = true
 
-		var px := _rng.randf_range(0.0, LEVEL_WIDTH)
+		var px := _pick_spaced_x(0.0, LEVEL_WIDTH)
 		var py := _rng.randf_range(float(FLOOR_Y_MIN), float(FLOOR_Y_MAX))
 
 		var depth := (py - FLOOR_Y_MIN) / (FLOOR_Y_MAX - FLOOR_Y_MIN)
@@ -54,6 +55,29 @@ func _ready() -> void:
 		_base_x.append(px)
 		_sprites.append(sp)
 
+# Busca una posición con al menos MIN_GAP de separación de los charcos ya
+# ubicados; si no encuentra ninguna candidata perfecta en unos intentos, se
+# queda con la mejor (más separada) que haya salido — mejor esfuerzo, nunca bloquea.
+func _pick_spaced_x(range_min: float, range_max: float) -> float:
+	const TRIES := 12
+	var best_x := _rng.randf_range(range_min, range_max)
+	var best_gap := _min_gap_to_others(best_x)
+	for i in range(TRIES - 1):
+		if best_gap >= MIN_GAP:
+			break
+		var cand := _rng.randf_range(range_min, range_max)
+		var gap := _min_gap_to_others(cand)
+		if gap > best_gap:
+			best_gap = gap
+			best_x = cand
+	return best_x
+
+func _min_gap_to_others(x: float) -> float:
+	var min_gap := INF
+	for bx in _base_x:
+		min_gap = minf(min_gap, absf(x - bx))
+	return min_gap
+
 func _process(_delta: float) -> void:
 	var cam := get_viewport().get_camera_2d()
 	if not cam:
@@ -66,4 +90,4 @@ func _process(_delta: float) -> void:
 		(_sprites[i] as Sprite2D).global_position.x = new_x
 		# Reciclar charcos que quedaron atrás
 		if _base_x[i] < cam_base - 1500.0:
-			_base_x[i] = cam_base + _rng.randf_range(800.0, 2500.0)
+			_base_x[i] = _pick_spaced_x(cam_base + 800.0, cam_base + 2500.0)
