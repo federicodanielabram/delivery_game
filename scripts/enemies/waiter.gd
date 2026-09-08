@@ -7,6 +7,13 @@ const DETECT_RANGE  := 99999.0
 const RETREAT_DIST  := 330.0
 const THROW_RANGE   := 99999.0
 const THROW_CDN     := 0.9
+# Antes tiraba en ráfagas de 3-4 platos casi seguidos (0.40-0.65s entre uno y
+# otro) con una pausa larga recién después de la ráfaga completa — un ritmo
+# muy marcado y predecible (tenso-tenso-tenso-respiro, repetir). Ahora cada
+# plato se decide solo, con un intervalo random amplio, así no se siente
+# cíclico y hay más aire real entre plato y plato.
+const THROW_MIN_INTERVAL := 2.5   # antes 1.6 — más espaciado entre platos
+const THROW_MAX_INTERVAL := 4.0   # antes 2.6
 const HURT_DUR      := 0.5
 const KNOCKBACK_DEC := 480.0
 const IDLE_FPS        := 24.0
@@ -35,13 +42,24 @@ var hp            := MAX_HP
 var entrance_target_x := 0.0
 
 var throw_timer        := 0.0
-var throw_burst_left   := 4
 var hurt_timer    := 0.0
 var pace_timer    := 0.0
 var pace_dir      := -1.0
 var knockback     := Vector2.ZERO
 var patrol_origin  := Vector2.ZERO
 var walk_frame     := 0.0
+
+# Límites opcionales de movimiento en X (sin usar = -INF/INF, no restringe
+# nada — comportamiento de siempre para el mundo abierto). level1.gd los usa
+# en la arena del boss para que el mozo de la derecha no cruce al boss ni
+# salga de pantalla por la derecha, y el de la izquierda lo mismo del otro
+# lado (ver set_movement_bounds).
+var _bound_min := -INF
+var _bound_max := INF
+
+func set_movement_bounds(min_x: float, max_x: float) -> void:
+	_bound_min = min_x
+	_bound_max = max_x
 var player: CharacterBody2D = null
 
 var hp_bar_node:   Node2D = null
@@ -55,6 +73,9 @@ var hp_bar_blocks: Array  = []
 func _ready() -> void:
 	collision_layer = 4
 	collision_mask  = 1
+	# Por debajo del boss (z_index 2 en boss.gd) — el mozo (y sus platos, ver
+	# plate.gd) se tienen que ver detrás de él, no adelante.
+	z_index = 1
 	add_to_group("enemy")
 	patrol_origin = global_position
 	_load_sprites()
@@ -84,8 +105,24 @@ func _do_entrance(_delta: float) -> void:
 func _skin_path() -> String:
 	return "res://assets/sprites/enemies/waiter" + ("_" + skin_variant if skin_variant != "" else "")
 
+# Cache compartido entre TODAS las instancias, por variante de skin. SpriteFrames
+# es solo metadata + referencias a texturas (nada de estado de reproducción, eso
+# vive en el AnimatedSprite2D), así que es seguro compartir el mismo resource.
+# Sin esto, cada mozo nuevo reconstruía el SpriteFrames entero desde cero en su
+# _ready() — ~210 frames repartidos en 8 animaciones, con add_frame() uno por
+# uno — aunque las texturas ya estuvieran en cache de load(). Eso era el costo
+# real (~145ms medidos) detrás del microcorte justo al entrar el primer mozo de
+# la arena del boss, pegado al freeze de la intro.
+static var _frames_cache: Dictionary = {}  # skin_variant (String) -> SpriteFrames
+
 func _load_sprites() -> void:
 	var base := _skin_path()
+	if _frames_cache.has(skin_variant):
+		sprite.sprite_frames = _frames_cache[skin_variant]
+		sprite.position = Vector2(0, -58)
+		sprite.play("idle")
+		return
+
 	var frames := SpriteFrames.new()
 	frames.add_animation("idle")
 	frames.set_animation_loop("idle", true)
@@ -150,6 +187,7 @@ func _load_sprites() -> void:
 		var tex := load("%s/death/death____%s.png" % [base, str(i).pad_zeros(3)]) as Texture2D
 		if tex: frames.add_frame("death", tex)
 
+	_frames_cache[skin_variant] = frames
 	sprite.sprite_frames = frames
 	# Mismo problema que el boss (ver boss.gd _load_sprites): el pie dibujado no
 	# coincide con el borde de abajo de la propia cápsula. Medido sobre los PNG
@@ -211,6 +249,7 @@ func _physics_process(delta: float) -> void:
 	sprite.flip_h = facing_right
 	_update_anim(delta)
 	move_and_slide()
+	global_position.x = clampf(global_position.x, _bound_min, _bound_max)
 
 func _update_anim(delta: float) -> void:
 	if state == State.THROW or state == State.HURT or state == State.DEAD: return
@@ -277,14 +316,8 @@ func _do_alert(delta: float) -> void:
 		velocity.x = move_toward(velocity.x, pace_dir * MOVE_SPEED * 0.95, 220.0 * delta)
 
 	if dist <= THROW_RANGE and throw_timer <= 0.0 and _is_on_screen():
-		if throw_burst_left > 0:
-			throw_burst_left -= 1
-			throw_timer = randf_range(0.40, 0.65)
-			sprite.speed_scale = 2.2
-		else:
-			throw_burst_left = randi_range(3, 4)
-			throw_timer = randf_range(1.10, 1.70)
-			sprite.speed_scale = 1.0
+		throw_timer         = randf_range(THROW_MIN_INTERVAL, THROW_MAX_INTERVAL)
+		sprite.speed_scale  = 1.0
 		state = State.THROW
 		sprite.play("throw")
 
@@ -299,7 +332,7 @@ func _spawn_plate() -> void:
 	var plate := PLATE_SCENE.instantiate() as Node2D
 	get_parent().add_child(plate)
 	var dir := 1.0 if facing_right else -1.0
-	plate.global_position = global_position + Vector2(dir * 85.0, -25.0)
+	plate.global_position = global_position + Vector2(dir * 85.0, -65.0)  # -45 antes, 20px más arriba
 	if plate.has_method("init"):
 		plate.call("init", dir)
 

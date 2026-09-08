@@ -18,6 +18,7 @@ const ROLL_DIST    := 48.0
 const ROLL_PAUSE   := 0.35
 
 const NEAR_FLOOR_DIST  := 130.0  # px — caída tan corta que no vale mostrar animación de caída
+const COYOTE_TIME      := 0.1    # margen para saltar aunque ya te caíste del borde
 
 const NITRO_CHARGE_DUR := 7.0
 const NITRO_ACTIVE_DUR := 2.0
@@ -58,10 +59,11 @@ const SLIDE_AFTERIMAGE_INTERVAL := 0.045  # cada cuánto larga una copia fantasm
 const SLIDE_AFTERIMAGE_DUR      := 0.16   # cuánto tarda cada copia en desvanecerse
 const SLIDE_DUST_FEET_OFFSET    := 78.0   # altura del emisor de polvo respecto al origen del jugador
 const MAX_HP        := 5
-const IFRAME_DUR    := 1.0    # segundos de invulnerabilidad tras recibir golpe
+const IFRAME_DUR    := 1.0    # segundos de invulnerabilidad tras recibir golpe (antes 0.7)
 const DEATH_FADE_DUR := 1.5
 const HIT_RANGE_X   := 112.0  # alcance horizontal del golpe
 const HIT_RANGE_Y   := 52.0   # tolerancia vertical
+const ENEMY_TOUCH_DIST := 88.0  # distancia a la que se considera "chocando" a un enemigo
 
 enum State      { IDLE, WALK, RUN, STOP, RUN_JUMP, JUMP_SQUAT, JUMP, FALL, LAND, JUMP_TO_CROUCH, CROUCH, CROUCH_WALK, STAND, ROLL, ATTACKING, AIR_ATTACKING, CROUCH_ATTACKING, AIR_KICKING, SLIDE, RUN_PUNCH, DEAD, DOUBLE_JUMP }
 enum AttackType { JAB, HOOK, UPPERCUT, SWEEP, KICK, CROUCH_KICK, AIR_PUNCH, AIR_DOWN_KICK, THROW, FLYING_KICK }
@@ -222,6 +224,9 @@ var jump_from_walk   := false
 var jump_from_idle   := false
 const JUMP_FPS := 24.0
 
+var coyote_timer            := 0.0    # >0 mientras todavía se puede saltar tras dejar el piso
+var _coyote_grounded_state: State = State.IDLE  # estado que tenía parado en el piso, para el salto de gracia
+
 const DOUBLE_JUMP_FPS        := 48.0
 const DOUBLE_JUMP_FRAMES     := 73
 const DOUBLE_JUMP_LAST_FRAME := 45   # índice 45 = frame 46; último frame de la vuelta
@@ -347,8 +352,11 @@ func _physics_process(delta: float) -> void:
 	# Flag de caída silenciosa desde auto aéreo (sin animación de jump)
 	if is_on_floor():
 		_aerial_drop = false
-	elif _last_on_aerial:
-		_aerial_drop = true
+		coyote_timer = COYOTE_TIME
+	else:
+		if _last_on_aerial:
+			_aerial_drop = true
+		coyote_timer = maxf(coyote_timer - delta, 0.0)
 
 	_apply_gravity(delta)
 	_tick_timers(delta)
@@ -378,25 +386,35 @@ func _physics_process(delta: float) -> void:
 		move_and_slide()
 		return
 
-	match state:
-		State.IDLE, State.WALK, State.RUN:  _handle_ground(delta)
-		State.STOP:              _handle_stop(delta)
-		State.RUN_JUMP:          _handle_run_jump(delta)
-		State.JUMP_SQUAT:        _handle_jump_squat(delta)
-		State.CROUCH:            _handle_crouch(delta)
-		State.CROUCH_WALK:       _handle_crouch_walk(delta)
-		State.STAND:             _handle_stand(delta)
-		State.ROLL:              _handle_roll(delta)
-		State.JUMP, State.FALL:  _handle_air(delta)
-		State.DOUBLE_JUMP:       _handle_double_jump(delta)
-		State.JUMP_TO_CROUCH:    _handle_jump_to_crouch(delta)
-		State.LAND:              _handle_land(delta)
-		State.ATTACKING:         _handle_attacking(delta)
-		State.AIR_ATTACKING:     _handle_air_attacking(delta)
-		State.AIR_KICKING:       _handle_air_kicking(delta)
-		State.SLIDE:             _handle_slide(delta)
-		State.RUN_PUNCH:         _handle_run_punch(delta)
-		State.CROUCH_ATTACKING:  _handle_crouch_attacking(delta)
+	# Coyote time: se cayó del borde hace instantes sin saltar — le damos el
+	# mismo salto que hubiera tenido parado en el piso, en vez de procesar
+	# el estado FALL como si nada este frame.
+	var coyote_jumped := false
+	if state == State.FALL and coyote_timer > 0.0 and Input.is_action_just_pressed("ui_up"):
+		coyote_timer = 0.0
+		_start_coyote_jump()
+		coyote_jumped = true
+
+	if not coyote_jumped:
+		match state:
+			State.IDLE, State.WALK, State.RUN:  _handle_ground(delta)
+			State.STOP:              _handle_stop(delta)
+			State.RUN_JUMP:          _handle_run_jump(delta)
+			State.JUMP_SQUAT:        _handle_jump_squat(delta)
+			State.CROUCH:            _handle_crouch(delta)
+			State.CROUCH_WALK:       _handle_crouch_walk(delta)
+			State.STAND:             _handle_stand(delta)
+			State.ROLL:              _handle_roll(delta)
+			State.JUMP, State.FALL:  _handle_air(delta)
+			State.DOUBLE_JUMP:       _handle_double_jump(delta)
+			State.JUMP_TO_CROUCH:    _handle_jump_to_crouch(delta)
+			State.LAND:              _handle_land(delta)
+			State.ATTACKING:         _handle_attacking(delta)
+			State.AIR_ATTACKING:     _handle_air_attacking(delta)
+			State.AIR_KICKING:       _handle_air_kicking(delta)
+			State.SLIDE:             _handle_slide(delta)
+			State.RUN_PUNCH:         _handle_run_punch(delta)
+			State.CROUCH_ATTACKING:  _handle_crouch_attacking(delta)
 	_update_collision()
 	_update_sprite()
 	_update_aerial_shadow(delta)
@@ -577,8 +595,11 @@ func take_damage(amount: int, from_right: bool, knockback: float = 200.0) -> voi
 	iframe_timer  = IFRAME_DUR
 	velocity.x    = 0.0
 	knockback_vel = knockback * (1.0 if from_right else -1.0)
-	if knockback != 0.0:
-		hitstun_timer = absf(knockback) / 520.0
+	# Bloqueo de input mínimo = lo que dura el parpadeo, tenga o no empuje
+	# físico (antes, con knockback=0 como el machetazo del boss, no se
+	# bloqueaba nada). Un empuje grande igual puede extenderlo más allá.
+	hitstun_timer = maxf(IFRAME_DUR, absf(knockback) / 520.0)
+	state         = State.IDLE
 	if hp <= 0:
 		_die()
 
@@ -614,7 +635,23 @@ func _flying_kick_impact() -> void:
 	if _try_hit_enemies_kb(2, FLYING_KICK_KB, FLYING_KICK_RANGE):
 		_do_hitstop(HITSTOP_DUR)
 		shake_amount = SHAKE_AMOUNT
+		_notify_finisher_hit(FLYING_KICK_RANGE)
 	_try_open_door()
+
+# El remate del combo (este golpe) es el único que hace reaccionar al boss
+# (ver react_to_finisher en boss.gd) — jab/hook y cualquier otro golpe solo le
+# restan vida por take_damage, sin interrumpirlo. Búsqueda separada de
+# _try_hit_enemies_kb (que ya aplicó el daño) para no tener que tocar esa
+# función compartida con el resto de los enemigos.
+func _notify_finisher_hit(range_x: float) -> void:
+	for enemy in get_tree().get_nodes_in_group("enemy"):
+		var e := enemy as Node2D
+		if not e: continue
+		var dx: float = e.global_position.x - global_position.x
+		var dy: float = abs(e.global_position.y - global_position.y)
+		if abs(dx) < range_x and dy < HIT_RANGE_Y and (dx > 0.0) == facing_right:
+			if e.has_method("react_to_finisher"):
+				e.call("react_to_finisher")
 
 func _do_hitstop(dur: float) -> void:
 	if _hitstop_active: return
@@ -657,12 +694,28 @@ func _start_throw() -> void:
 
 # ── Suelo ────────────────────────────────────────────────────────────────────
 
+# Coyote time: el jugador dejó el piso hace instantes sin saltar — le damos
+# el mismo salto que hubiera tenido parado en el piso, usando el estado que
+# tenía justo antes de caerse (_coyote_grounded_state) para decidir animación
+# y control aéreo, igual que el salto disparado desde _handle_ground.
+func _start_coyote_jump() -> void:
+	jump_frame_index         = 3
+	jump_frame_timer         = 0.0
+	_double_jump_used        = false
+	_last_surface_ground_car = false
+	jump_from_run            = true
+	jump_from_walk           = _coyote_grounded_state != State.RUN
+	jump_from_idle           = _coyote_grounded_state == State.IDLE
+	velocity.y               = RUN_JUMP_FORCE
+	state                    = State.JUMP
+
 func _handle_ground(delta: float) -> void:
 	# Si el piso desapareció (borde de auto aéreo) → caída libre, sin acciones hasta aterrizar.
 	if not is_on_floor():
 		if not _aerial_drop and not _floor_nearby(NEAR_FLOOR_DIST):
 			if not _last_surface_ground_car:
-				_fall_from_run = (state == State.RUN)
+				_fall_from_run          = (state == State.RUN)
+				_coyote_grounded_state  = state
 				jump_from_run  = false
 				jump_from_walk = false
 				jump_from_idle = false
@@ -725,7 +778,9 @@ func _handle_ground(delta: float) -> void:
 		state      = State.JUMP
 		return
 
-	if state != State.RUN and combo_cooldown_timer <= 0.0 and Input.is_action_just_pressed("attack"):
+	# "attack" es el mismo combo en cualquier estado de piso, incluso RUN: se
+	# frena en el acto y pega, aunque se siga presionando hacia adelante.
+	if combo_cooldown_timer <= 0.0 and Input.is_action_just_pressed("attack"):
 		combo_step = 0
 		_launch_combo()
 		return
@@ -1052,14 +1107,17 @@ func _handle_air(delta: float) -> void:
 	else:
 		air_max = MAX_SPEED * NITRO_SPEED_MULT if nitro_active else MAX_SPEED
 	if dir != 0.0:
-		if (dir > 0.0) == facing_right:
-			if is_on_wall():
-				velocity.x = move_toward(velocity.x, 0.0, AIR_BRAKE * delta)
-			else:
-				velocity.x = move_toward(velocity.x, dir * air_max, AIR_BRAKE * delta)
-		else:
-			# Dirección inversa: frena drásticamente hacia 0, sin desplazarse para atrás.
+		# Se puede girar en el aire las veces que quiera. Si invierte la
+		# dirección, la inercia se invierte con él: misma fuerza, otro sentido,
+		# en vez de frenar y volver a acelerar desde cero.
+		facing_right  = dir > 0.0
+		sprite.flip_h = not facing_right
+		if sign(dir) != sign(velocity.x) and absf(velocity.x) > 1.0:
+			velocity.x = -velocity.x
+		if is_on_wall():
 			velocity.x = move_toward(velocity.x, 0.0, AIR_BRAKE * delta)
+		else:
+			velocity.x = move_toward(velocity.x, dir * air_max, AIR_BRAKE * delta)
 	else:
 		if not _fall_from_run:
 			velocity.x = move_toward(velocity.x, 0.0, FRICTION * delta * 0.3)
@@ -1145,6 +1203,10 @@ func _handle_double_jump(delta: float) -> void:
 
 	var dir := Input.get_axis("ui_left", "ui_right")
 	if dir != 0.0:
+		facing_right  = dir > 0.0
+		sprite.flip_h = not facing_right
+		if sign(dir) != sign(velocity.x) and absf(velocity.x) > 1.0:
+			velocity.x = -velocity.x
 		velocity.x = move_toward(velocity.x, dir * MAX_SPEED, 800.0 * delta)
 	else:
 		velocity.x = move_toward(velocity.x, 0.0, FRICTION * delta * 0.3)
@@ -1224,22 +1286,22 @@ func _handle_attacking(delta: float) -> void:
 			if combo_step == 2:
 				combo_cooldown_timer = COMBO_COOLDOWN
 			combo_step = 0
-			var dir := Input.get_axis("ui_left", "ui_right")
-			if is_on_floor() and dir != 0.0:
-				facing_right  = dir > 0.0
-				sprite.flip_h = not facing_right
-				run_frame_index = 0
-				run_frame_timer = 0.0
-				velocity.x = dir * MAX_SPEED
-				state = State.RUN
-			else:
-				idle_frame_index = 0
-				idle_frame_timer = 0.0
-				state = State.IDLE if is_on_floor() else State.FALL
+			# Va a IDLE aunque se siga sosteniendo la dirección — así, si el
+			# siguiente attack llega con un pequeño gap, te encuentra parado y
+			# arranca un combo nuevo en el lugar en vez de tener que frenar un
+			# RUN a toda velocidad primero. Si no llega, _handle_ground vuelve
+			# a correr solo por el input sostenido, como cualquier otro caso.
+			idle_frame_index = 0
+			idle_frame_timer = 0.0
+			state = State.IDLE if is_on_floor() else State.FALL
 
 func _handle_air_attacking(delta: float) -> void:
 	var dir := Input.get_axis("ui_left", "ui_right")
 	if dir != 0.0:
+		facing_right  = dir > 0.0
+		sprite.flip_h = not facing_right
+		if sign(dir) != sign(velocity.x) and absf(velocity.x) > 1.0:
+			velocity.x = -velocity.x
 		velocity.x = move_toward(velocity.x, dir * MAX_SPEED, ACCELERATION * delta * 0.4)
 
 	attack_timer -= delta
@@ -1248,15 +1310,16 @@ func _handle_air_attacking(delta: float) -> void:
 		idle_frame_timer = 0.0
 		state = State.IDLE if is_on_floor() else (State.FALL if velocity.y > 0.0 else State.JUMP)
 
-# Patada aérea: se dispara en el aire y la animación maneja todo el movimiento
-# (patada en el aire → caída → aterrizaje → idle). La gravedad la baja al piso;
-# mientras esté en el aire la animación se congela en AIR_KICK_HOLD, y al tocar
-# el suelo sigue con el aterrizaje hasta idle.
+# Patada aérea: se dispara en el aire y la gravedad la baja al piso; mientras
+# esté en el aire la animación se congela en AIR_KICK_HOLD hasta pegar o
+# acercarse al piso. Al tocar el piso corta al instante a crouch/run/idle
+# según el input, sin esperar a que termine la animación de recovery.
 func _handle_air_kicking(delta: float) -> void:
 	var grounded := is_on_floor()
-
 	if grounded:
-		# Al tocar el piso deja de desplazarse en el acto; el input puede arrancar crouch/run.
+		# Al tocar el piso corta la animación al instante, sin esperar a que
+		# termine el recovery: el input puede arrancar crouch/run, y sin input
+		# va directo a idle — igual que un aterrizaje normal de salto.
 		if Input.is_action_pressed("ui_down"):
 			crouch_frame_index = 0
 			crouch_frame_timer = 0.0
@@ -1272,7 +1335,19 @@ func _handle_air_kicking(delta: float) -> void:
 			velocity.x      = idir * MAX_SPEED
 			state = State.RUN
 			return
-		velocity.x = 0.0   # aterrizó sin input: frena ya y hace el recovery en el lugar → idle
+		velocity.x        = 0.0
+		idle_frame_index  = 0
+		idle_frame_timer  = 0.0
+		state             = State.IDLE
+		return
+	# Se puede girar en el aire durante la patada, igual que en un salto normal.
+	var air_dir := Input.get_axis("ui_left", "ui_right")
+	if air_dir != 0.0:
+		facing_right  = air_dir > 0.0
+		sprite.flip_h = not facing_right
+		if sign(air_dir) != sign(velocity.x) and absf(velocity.x) > 1.0:
+			velocity.x = -velocity.x
+		velocity.x = move_toward(velocity.x, air_dir * (MAX_SPEED * 0.5), AIR_BRAKE * delta)
 	# Golpe: al llegar a la pierna extendida sigue chequeando enemigos hasta conectar.
 	if not air_kick_connected and air_kick_frame_index >= AIR_KICK_IMPACT:
 		var hit := false
@@ -1305,7 +1380,9 @@ func _handle_air_kicking(delta: float) -> void:
 		air_kick_frame_timer -= 1.0 / fps
 
 	var last := tex_air_kick_frames.size() - 1
-	var near_ground := grounded or test_move(global_transform, Vector2(0.0, AIR_KICK_NEAR_GROUND))
+	# grounded siempre es false acá abajo: si tocó el piso, la rama de arriba
+	# ya hizo return con el estado resuelto (crouch/run/idle) este mismo frame.
+	var near_ground := test_move(global_transform, Vector2(0.0, AIR_KICK_NEAR_GROUND))
 
 	# Freno en la patada extendida hasta pegar o acercarse al piso.
 	var cap := last
@@ -1313,19 +1390,6 @@ func _handle_air_kicking(delta: float) -> void:
 		cap = AIR_KICK_HOLD
 	if step:
 		air_kick_frame_index = mini(air_kick_frame_index + 1, cap)
-
-	# Terminó la secuencia en el piso → derivar estado de la velocidad heredada del salto.
-	if grounded and air_kick_frame_index >= last:
-		var idir := Input.get_axis("ui_left", "ui_right")
-		if idir != 0.0 or absf(velocity.x) > 50.0:
-			run_frame_index = 0
-			run_frame_timer = 0.0
-			state = State.RUN
-		else:
-			velocity.x       = 0.0
-			idle_frame_index = 0
-			idle_frame_timer = 0.0
-			state = State.IDLE
 
 func _handle_crouch_attacking(delta: float) -> void:
 	velocity.x   = move_toward(velocity.x, 0.0, FRICTION * delta)
@@ -1827,7 +1891,6 @@ func _radial_texture(size: int, color: Color) -> ImageTexture:
 
 func _separate_from_enemies(_delta: float) -> void:
 	if not is_on_floor(): return
-	const MIN_SEP := 88.0
 	for enemy in get_tree().get_nodes_in_group("enemy"):
 		var e := enemy as Node2D
 		if not e: continue
@@ -1839,7 +1902,7 @@ func _separate_from_enemies(_delta: float) -> void:
 		var col := e.get_node_or_null("CollisionShape2D") as CollisionShape2D
 		if col and col.disabled: continue
 		var dx: float = global_position.x - e.global_position.x
-		var overlap: float = MIN_SEP - abs(dx)
+		var overlap: float = ENEMY_TOUCH_DIST - abs(dx)
 		if overlap > 0.0:
 			var push: float = sign(dx) if abs(dx) > 0.5 else 1.0
 			global_position.x += push * overlap * 0.75

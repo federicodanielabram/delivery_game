@@ -24,10 +24,18 @@ const NIGHT_ENEMY := Color(0.52, 0.47, 0.60)
 const NIGHT_PLAYER := Color(0.76, 0.70, 0.90)   # ver _ready() — mismo tinte que el PP (subido un poco)
 const BOSS_TINT_EXTRA := Color(0.7, 0.7, 0.7, 1.0)   # extra oscurecido — arte del boss es blanco, compensa
 
-const _BOSS_STATE_IDLE     := 0   # State.IDLE en boss.gd
-const _BOSS_STATE_APPROACH := 1   # State.APPROACH en boss.gd
+const _BOSS_STATE_IDLE       := 0   # State.IDLE en boss.gd
+const _BOSS_STATE_APPROACH   := 1   # State.APPROACH en boss.gd
+const _BOSS_STATE_DEAD       := 5   # State.DEAD en boss.gd
+const _BOSS_STATE_INTRO_WALK := 6   # State.INTRO_WALK en boss.gd
 
-const _WAITER_DEAD      := 4   # State.DEAD en waiter.gd
+# Bordes del hitbox del boss relativos a su global_position.x — Boss.tscn:
+# CollisionShape2D.position.x (12.5) ± CapsuleShape2D.radius (88.5).
+const _BOSS_RIGHT_EDGE_OFFSET := 101.0
+const _BOSS_LEFT_EDGE_OFFSET  := -76.0
+const _WAITER_RADIUS          := 15.6   # Waiter*.tscn CapsuleShape2D.radius
+
+const _WAITER_DEAD      := 5   # State.DEAD en waiter.gd (enum: ENTRANCE,PATROL,ALERT,THROW,HURT,DEAD — era 4, que es HURT)
 
 # Capa de colisión exclusiva de las paredes invisibles de la arena (izq/der) —
 # nadie más la usa hoy. Solo el PP la tiene en su collision_mask (ver
@@ -40,6 +48,11 @@ const WALL_LAYER := 16
 # en _process): te ahorrás la persecución y llegás en PIZZERIA_RUNWAY px nomás,
 # para iterar rápido en la pelea del boss. Volver a false para el flujo normal.
 const DEBUG_SKIP_DRONE_CHASE := true
+
+# Con esto en true, el casillero de mozos no arranca nunca al llegar a la
+# arena — queda 1v1 solo contra el boss, para poder sentir su timing sin
+# interferencia. Volver a false para el flujo normal.
+const DEBUG_DISABLE_WAITERS := false
 
 # ── Mecánica: parar al boss/mozos con los pies apoyados en el piso ───────────
 # Boss y Waiter son CharacterBody2D SIN offset: su Sprite2D/AnimatedSprite2D y
@@ -87,31 +100,54 @@ var _arrived_pizzeria  := false
 var _pizzeria_x        := 0.0     # borde izquierdo real del edificio de la pizzeria
 var _arena_left         := 0.0    # límites de la pantalla fija final (una sola pantalla, sin scroll)
 var _arena_right        := 0.0
+var _arena_center       := 0.0    # centro real de la arena EN EL PISO — coincide con el centro
+	# visual del edificio de la pizzeria (ver _trigger_pizzeria_ending, donde el
+	# edificio se planta centrado en arena_center, no en _pizzeria_x — el boss
+	# está al 80% de la pantalla, BOSS_SCREEN_POS, pero la pizzeria al 50%).
+	# Es el punto al que camina el boss en la intro (ver start_intro_walk).
 var _arena_seal_trigger_x := 0.0  # x de mundo donde hay que sellar sin salto (ver _trigger_pizzeria_ending)
 
 # Pausa de llegada: la cámara se traba de una al llegar (_seal_pizzeria_arena),
 # y el PP sigue corriendo con control normal hasta PLAYER_INTRO_SCREEN_POS de
-# esa pantalla ya fija — ahí, y solo ahí, se frena en seco y queda en IDLE
-# unos segundos (sonidos/talk acá) antes de que se libere. Los mozos ya
-# empiezan a entrar DURANTE este freeze (ver sistema de casilleros más abajo).
+# esa pantalla ya fija — ahí, y solo ahí, se frena en seco y queda en IDLE,
+# congelado, sin poder moverse. Ahí arranca la entrada escrita: el boss (ver
+# start_intro_walk en boss.gd) camina despacio desde donde aparece hasta
+# _arena_center — más adelante, cuando haya diálogo, también hablaría acá. El
+# freeze dura lo que tarde esa caminata (variable, no un tiempo fijo) más
+# INTRO_POST_WALK_PAUSE de aire después de llegar, y recién ahí se libera al
+# PP y arranca la pelea de verdad (ver _process, bloque de _intro_active).
 const PLAYER_INTRO_SCREEN_POS := 0.20   # 20% del borde izquierdo, como pidió
-const INTRO_HOLD_DUR          := 3.2    # segundos en IDLE (2.2 + 1 pedido, para que entre tiempo la entrada escalonada)
+const INTRO_POST_WALK_PAUSE   := 0.5    # beat después de que el boss llega, antes de soltar todo
 var _intro_target_x  := 0.0
 var _intro_pending   := false   # true entre "llegó a la arena" y "llegó al punto de frenada"
-var _intro_active    := false   # true mientras está frenado en IDLE (cuenta INTRO_HOLD_DUR)
-var _intro_timer     := 0.0
+var _intro_active    := false   # true durante TODA la intro (caminata del boss + pausa)
+var _intro_walk_done := false   # true una vez que el boss ya llegó a _arena_center
+var _intro_timer     := 0.0     # solo cuenta durante la pausa final, después de _intro_walk_done
+
+# ── Primera pareja de mozos: entrada escrita (derecha, después izquierda) ────
+# No es el sistema de casilleros de siempre (ver más abajo, hoy dormido) —
+# acá el orden es fijo y secuencial a propósito: entra SOLO uno a la vez,
+# alternando lado (derecha, izquierda, derecha, izquierda...), y recién cuando
+# muere entra el siguiente por el otro lado. Sigue así indefinidamente
+# mientras el boss siga vivo — la idea es forzar al jugador a decidir:
+# ¿esquivo/paso al boss para ir a callar al mozo molesto, o lo dejo tirando
+# platos y peleo al boss primero? Se corta solo cuando el boss muere (ver
+# _tick_first_duel).
+var _duel_active       := false
+var _duel_next_is_right := true   # qué lado le toca al próximo mozo
+var _duel_current: Node = null
 
 # ── Mozos: sistema de 2 casilleros (izquierda/derecha) ───────────────────────
-# Nada de "oleadas" — cada costado mantiene como mucho un mozo vivo. Cuando se
-# vacía (muere, o todavía no entró nadie), arranca una pausa de
-# WAITER_RESPAWN_DELAY ("para respirar", pedido explícito) y recién ahí entra
-# el reemplazo, siempre por EL MISMO costado. Arranca durante el freeze de
-# _start_boss_intro: la derecha (atrás del boss) entra primero, la izquierda
-# WAITER_INITIAL_STAGGER después. Tope global de WAITER_TOTAL_CAP — una vez
-# alcanzado, los casilleros dejan de rellenarse (ahí es 1v1 con el boss).
-# Números en la línea de un beat-em-up clásico (Streets of Rage/Final Fight):
-# nunca más de 2 en pantalla, entran de a uno con respiro, total acotado antes
-# del boss real.
+# DORMIDO por ahora (ver _first_duel_* arriba, que lo reemplaza para esta
+# primera pareja) — queda el código listo para cuando sigamos agregando flujo
+# después de la primera pareja. Nada de "oleadas": cada costado mantiene como
+# mucho un mozo vivo. Cuando se vacía (muere, o todavía no entró nadie),
+# arranca una pausa de WAITER_RESPAWN_DELAY ("para respirar", pedido
+# explícito) y recién ahí entra el reemplazo, siempre por EL MISMO costado.
+# Tope global de WAITER_TOTAL_CAP — una vez alcanzado, los casilleros dejan de
+# rellenarse (ahí es 1v1 con el boss). Números en la línea de un beat-em-up
+# clásico (Streets of Rage/Final Fight): nunca más de 2 en pantalla, entran de
+# a uno con respiro, total acotado antes del boss real.
 const WAITER_TOTAL_CAP       := 8
 const WAITER_RESPAWN_DELAY   := 1.8   # pausa para respirar antes del reemplazo
 const WAITER_INITIAL_STAGGER := 1.0   # la izquierda arranca 1s después que la derecha
@@ -220,6 +256,10 @@ func _ready() -> void:
 	var hud: Node = HUD_SCENE.instantiate()
 	add_child(hud)
 
+	# Precalentar sprites de mozos — evita el microcorte al llegar a la arena
+	# del boss. Ver _prewarm_waiter_sprites().
+	_prewarm_waiter_sprites()
+
 	# Modo infinito hasta escapar del dron — a partir de ahí, fin de nivel con
 	# la pizzeria (ver _trigger_pizzeria_ending, disparado desde _process()).
 
@@ -297,16 +337,22 @@ func _process(delta: float) -> void:
 			_trigger_pizzeria_ending(player.global_position.x, player.global_position.x + PIZZERIA_RUNWAY)
 
 	# El boss se reposiciona cada frame al mismo ritmo que un cop (parallax=1.2)
-	# — ver _boss_base_x en _trigger_pizzeria_ending. Esto sigue haciendo falta
-	# INCLUSO después de llegar: con el margen de cámara nuevo (ver
-	# _seal_pizzeria_arena) la cámara puede seguir moviéndose un poco dentro de
-	# la arena, y si dejáramos de tocar al boss ahí se desincroniza del
-	# parallax de la pizzeria/edificios (mismo bug que ya resolvimos una vez).
-	# boss.gd mantiene al boss FIJO (velocity.x=0) en IDLE y APPROACH — no pisa
-	# nada tocar su position.x en esos dos estados. Recién en combate de verdad
-	# (ATTACK/KICK/HURT — con knockback real) soltamos del todo y manda su IA.
+	# — ver _boss_base_x. Esto corre TODO el tiempo, incluida la pelea: aunque
+	# la arena esté "sellada", la cámara igual sigue un poco al jugador dentro
+	# del margen (ver _seal_pizzeria_arena) — si el boss dejara de reaccionar a
+	# eso, se ve desincronizado del fondo (edificios/tráfico), que sí lo siguen
+	# haciendo. Solo se excluye durante INTRO_WALK (se mueve solo, caminando al
+	# centro) y DEAD (se queda clavado donde murió).
+	# _boss_base_x se recalcula en dos momentos para que esta fórmula caiga
+	# exacta en el punto donde el boss REALMENTE debe estar en ese instante:
+	# primero en _trigger_pizzeria_ending (ancla en _pizzeria_x, mientras se
+	# acerca), y de nuevo apenas termina la caminata de entrada — intro_walk_done
+	# — (ancla en _arena_center, ver el bloque de _intro_active más abajo) — si
+	# no, al volver a aplicarse después de la caminata (incluido el hueco de la
+	# pausa antes de begin_combat), teletransportaría al boss de vuelta al 80%
+	# de pantalla, deshaciendo la entrada.
 	if _escape_triggered and _boss_node and cam \
-			and _boss_node.get("state") in [_BOSS_STATE_IDLE, _BOSS_STATE_APPROACH]:
+			and not (_boss_node.get("state") in [_BOSS_STATE_DEAD, _BOSS_STATE_INTRO_WALK]):
 		var boss_cam_x := cam.get_screen_center_position().x
 		_boss_node.position.x = _boss_base_x + boss_cam_x * (1.0 - BOSS_PARALLAX)
 
@@ -326,23 +372,38 @@ func _process(delta: float) -> void:
 		_start_boss_intro(player)
 
 	if _intro_active:
-		_intro_timer -= delta
-		if _intro_timer <= 0.0:
-			_intro_active = false
-			if player:
-				player.call("set_cutscene_lock", false)
+		if not _intro_walk_done:
+			# Esperando a que el boss termine de caminar hasta _arena_center
+			# (start_intro_walk). Cuando haya diálogo, acá también se esperaría
+			# a que termine de hablar.
+			if _boss_node and _boss_node.get("intro_walk_done") == true:
+				_intro_walk_done = true
+				_intro_timer     = INTRO_POST_WALK_PAUSE
+				# Recalcular el ancla del parallax: de acá en más el boss vive
+				# en _arena_center, no en _pizzeria_x (ver comentario en el
+				# reposicionamiento más arriba en este mismo _process).
+				_boss_base_x = _arena_center * BOSS_PARALLAX
+		else:
+			_intro_timer -= delta
+			if _intro_timer <= 0.0:
+				_intro_active = false
+				if player:
+					player.call("set_cutscene_lock", false)
+				if _boss_node:
+					_boss_node.call("begin_combat")
+				if not DEBUG_DISABLE_WAITERS:
+					_start_first_duel()
 
-	# Casilleros de mozos — arrancan en _start_boss_intro (durante el freeze) y
-	# siguen andando solos por el resto de la pelea, hasta WAITER_TOTAL_CAP.
+	# Duelo de mozos alternado (entrada escrita, ver comentario junto a
+	# _duel_active) — arranca recién cuando termina toda la intro de arriba,
+	# no durante el freeze.
+	if _duel_active:
+		_tick_first_duel()
+
+	# Casilleros de mozos — dormido por ahora (ver _duel_* arriba, que lo reemplaza).
 	if _waiter_slots_active:
 		_tick_waiter_slots(delta)
 
-	# DEBUG temporal — confirma si la cámara realmente sigue moviéndose después de encerrar.
-	if _arrived_pizzeria and player and Engine.get_physics_frames() % 30 == 0:
-		var dcam := get_viewport().get_camera_2d()
-		if dcam:
-			print("[pizzeria] player.x=%.0f cam_center=%.0f limit_right=%s" \
-				% [player.global_position.x, dcam.get_screen_center_position().x, str(dcam.limit_right)])
 
 # Se dispara una sola vez, apenas el dron marca escaped=true. El boss y el
 # edificio de la pizzeria van en el MISMO punto (anchor_x) — ahí termina el
@@ -378,19 +439,26 @@ func _trigger_pizzeria_ending(escape_x: float, anchor_x: float) -> void:
 	# Sellando en este punto en cambio, lo que ya se ve YA es el centro de la
 	# arena — sellar pasa a ser un no-op visual, cero salto.
 	var arena_center := (_arena_left + _arena_right) * 0.5
+	_arena_center    = arena_center
 	var cam_offset_x := cam.offset.x if cam else 0.0
 	_arena_seal_trigger_x = arena_center - cam_offset_x
-
-	print("[pizzeria] escape trigger — boss/pizzeria=%.0f arena=[%.0f, %.0f] seal_trigger=%.0f" \
-		% [_pizzeria_x, _arena_left, _arena_right, _arena_seal_trigger_x])  # DEBUG temporal
 
 	# El boss se mueve como un cop mientras se acerca (ver bloque en _process,
 	# BOSS_PARALLAX=1.2). Acá se calcula su "base" sin parallax, compensada
 	# para que en el instante en que la cámara se traba (cam_x == arena_center,
-	# constante de ahí en más) el resultado caiga EXACTO en _pizzeria_x:
+	# constante de ahí en más) el resultado caiga EXACTO en el punto donde
+	# tiene que arrancar la caminata de entrada — NO en _pizzeria_x (eso sigue
+	# siendo el ancla del edificio/pista, desacoplado del boss a propósito).
+	# Así el boss ya está parado ahí durante todo el acercamiento, en vez de
+	# aparecer en _pizzeria_x y recién saltar a este punto al congelarse el PP
+	# (ver _start_boss_intro, que ya no necesita reposicionarlo).
 	#   render_x = base_x + arena_center*(1-parallax)  →  despejando:
-	#   base_x   = _pizzeria_x - arena_center*(1-parallax)
-	_boss_base_x = _pizzeria_x - arena_center * (1.0 - BOSS_PARALLAX)
+	#   base_x   = boss_rest_x - arena_center*(1-parallax)
+	var boss_rest_x := _pizzeria_x
+	if _boss_node:
+		var advance_px: float = _boss_node.call("get_walk_advance_per_cycle_px")
+		boss_rest_x = arena_center + 2.0 * advance_px
+	_boss_base_x = boss_rest_x - arena_center * (1.0 - BOSS_PARALLAX)
 
 	# El edificio de la pizzeria queda centrado en la PANTALLA (arena_center,
 	# 50%), no en el boss (que está al 80%) — quedan desacoplados a propósito.
@@ -430,7 +498,7 @@ func _trigger_pizzeria_ending(escape_x: float, anchor_x: float) -> void:
 		sl.call("finalize_for_pizzeria", piz_left - 100.0, piz_right + 100.0, piz_right - 35.0)
 
 	if _boss_node:
-		_boss_node.position     = Vector2(_pizzeria_x, BOSS_FLOOR_Y)
+		_boss_node.position     = Vector2(boss_rest_x, BOSS_FLOOR_Y)
 		_boss_node.visible      = true
 		_boss_node.process_mode = Node.PROCESS_MODE_INHERIT
 		if _boss_node is CollisionObject2D:
@@ -474,37 +542,59 @@ func _seal_pizzeria_arena() -> void:
 		cam.limit_left  = int(_arena_left  - margin) - int(cam.offset.x)
 		cam.limit_right = int(_arena_right + margin) - int(cam.offset.x)
 	_create_right_wall(int(_arena_right + margin) + 20)
-	print("[pizzeria] arrival — arena=[%.0f, %.0f] margin=%.0f limit_left=%s limit_right=%s" \
-		% [_arena_left, _arena_right, margin, str(cam.limit_left if cam else "?"), str(cam.limit_right if cam else "?")])  # DEBUG temporal
 
 	_intro_target_x = _arena_left + (_arena_right - _arena_left) * PLAYER_INTRO_SCREEN_POS
 	_intro_pending  = true
 
-# Frena al PP en seco al llegar a _intro_target_x y lo deja en IDLE — acá
-# arrancan también los casilleros de mozos (entran DURANTE este freeze, no
-# después). El de la derecha (atrás del boss) ya, el de la izquierda un toque
-# más tarde (WAITER_INITIAL_STAGGER).
+# Frena al PP en seco al llegar a _intro_target_x y lo deja en IDLE, congelado
+# — y ahí arranca la entrada escrita del boss (camina hasta _arena_center, ver
+# start_intro_walk en boss.gd). Todo lo demás (soltar al PP, empezar la
+# primera pareja de mozos) espera a que esa caminata termine — ver el bloque
+# de _intro_active en _process.
+#
+# OJO: no reposicionar al PP en _intro_target_x acá. Este chequeo corre en
+# _process, después de que la física ya lo movió ese frame — para cuando
+# llega, el PP ya está unos px pasado del punto exacto (más con nitro). Forzar
+# la posición lo teletransportaba hacia atrás esos px en el mismo instante en
+# que se congela, y se veía como un pequeño salto/rebote justo antes del
+# freeze. La cámara ya quedó fijada por _seal_pizzeria_arena() con sus propios
+# límites, así que unos px de diferencia acá no afectan el encuadre — lo
+# dejamos frenar donde ya está.
 func _start_boss_intro(player: Node2D) -> void:
-	player.global_position.x = _intro_target_x
 	player.call("set_cutscene_lock", true)
-	_intro_active = true
-	_intro_timer  = INTRO_HOLD_DUR
+	_intro_active    = true
+	_intro_walk_done = false
 	_play_boss_intro_sfx()
 
-	_waiter_slots_active   = true
-	_waiters_spawned_total = 0
-	_waiter_right          = null
-	_waiter_left           = null
-	_waiter_right_timer    = 0.0                     # entra casi al toque
-	_waiter_left_timer     = WAITER_INITIAL_STAGGER   # entra un poco después
-
-	print("[pizzeria] intro — PP frenado en x=%.0f, %.1fs de hold, mozos ya arrancando" \
-		% [_intro_target_x, INTRO_HOLD_DUR])  # DEBUG temporal
+	if _boss_node:
+		# El boss ya está parado exactamente 2 ciclos de walk atrás del centro
+		# desde que se activó (ver boss_rest_x en _trigger_pizzeria_ending) — acá
+		# no hace falta reposicionarlo, solo arrancarlo a caminar desde donde ya
+		# está.
+		_boss_node.call("start_intro_walk", _arena_center)
 
 # TODO: no hay assets de audio todavía (assets/audio/ está vacío) — acá va el
 # "talk" del boss / grito del PP cuando los tengamos. Placeholder a propósito.
 func _play_boss_intro_sfx() -> void:
 	pass
+
+# Arranca el duelo alternado de mozos (ver comentario junto a _duel_active
+# más arriba) — se llama una sola vez, cuando termina toda la intro. Entra
+# SOLO el de la derecha primero; el resto lo maneja _tick_first_duel.
+func _start_first_duel() -> void:
+	_duel_active        = true
+	_duel_next_is_right = true
+	_duel_current        = _spawn_side_waiter(true)
+
+# Apenas muere el mozo actual, entra el siguiente por el lado contrario — y
+# así indefinidamente. Se corta solo (sin más spawns) cuando el boss muere.
+func _tick_first_duel() -> void:
+	if _boss_node and _boss_node.get("state") == _BOSS_STATE_DEAD:
+		_duel_active = false
+		return
+	if _duel_current and (not is_instance_valid(_duel_current) or _duel_current.get("state") == _WAITER_DEAD):
+		_duel_next_is_right = not _duel_next_is_right
+		_duel_current       = _spawn_side_waiter(_duel_next_is_right)
 
 # Un tick de los dos casilleros — ver comentario junto a las variables
 # _waiter_*. Sin abstraer en un loop a propósito: son solo dos, y así queda
@@ -529,6 +619,21 @@ func _tick_waiter_slots(delta: float) -> void:
 			_waiters_spawned_total += 1
 
 # is_right=true entra desde afuera del borde derecho (atrás del boss);
+# Instancia y libera una copia de cada variante de mozo apenas arranca el
+# nivel, lejos de todo (x=-5000, fuera de la pantalla inicial). El único
+# propósito es forzar la carga de sus ~210 texturas cada una (waiter.gd
+# _load_sprites, vía load() en _ready) ahora, en un momento sin nada crítico
+# pasando, en vez de que la primera vez sea recién al llegar a la arena del
+# boss — ahí coincidía con el freeze de la intro (_start_boss_intro arranca el
+# casillero de mozos con timer=0.0, "entra casi al toque") y se sentía como un
+# microcorte pegado al freeze.
+func _prewarm_waiter_sprites() -> void:
+	for scene in [WAITER_SCENE, WAITER_DARK_SCENE, WAITER_LIGHT_SCENE]:
+		var w: Node = scene.instantiate()
+		(w as Node2D).position = Vector2(-5000.0, WAITER_FLOOR_Y)
+		add_child(w)
+		w.queue_free()
+
 # is_right=false desde afuera del borde izquierdo.
 func _spawn_side_waiter(is_right: bool) -> Node:
 	var arena_w := _arena_right - _arena_left
@@ -540,6 +645,16 @@ func _spawn_side_waiter(is_right: bool) -> Node:
 	(waiter as Node2D).modulate = NIGHT_ENEMY
 	add_child(waiter)
 	waiter.call("start_entrance", target_x)
+	# El de la derecha se mueve entre el boss y el borde derecho; el de la
+	# izquierda entre el borde izquierdo y el boss — ninguno cruza al otro
+	# lado del boss ni sale de la pantalla de la arena. El límite se calcula
+	# borde-a-borde (no centro-a-centro) para que se frene tocando al boss,
+	# no superpuesto adentro suyo.
+	var boss_x := _boss_node.global_position.x if _boss_node else (_arena_left + arena_w * 0.5)
+	if is_right:
+		waiter.call("set_movement_bounds", boss_x + _BOSS_RIGHT_EDGE_OFFSET + _WAITER_RADIUS, _arena_right)
+	else:
+		waiter.call("set_movement_bounds", _arena_left, boss_x + _BOSS_LEFT_EDGE_OFFSET - _WAITER_RADIUS)
 	return waiter
 
 func _spawn_waiter(x: float) -> void:

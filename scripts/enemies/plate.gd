@@ -3,8 +3,21 @@ extends Area2D
 const SPEED       := 820.0
 const DMG         := 1
 const LIFETIME    := 3.0
+
+# ── DEBUG: el plato no le saca vida al jugador ────────────────────────────────
+# Con esto en true se puede probar la jugabilidad de los mozos sin morir por
+# los platos. Volver a false para el flujo normal.
+const DEBUG_NO_DAMAGE_TO_PLAYER := true
 const FRAME_COUNT := 30
 const SPIN_FPS    := 120.0
+
+# Estados agachados de player.gd (State enum) — si el PP está en alguno de
+# estos, el plato pasa por encima sin pegarle, en vez de conectar siempre.
+const _PLAYER_STATE_CROUCH            := 10
+const _PLAYER_STATE_CROUCH_WALK       := 11
+const _PLAYER_STATE_ROLL              := 13
+const _PLAYER_STATE_CROUCH_ATTACKING  := 16
+const _CROUCHED_STATES := [_PLAYER_STATE_CROUCH, _PLAYER_STATE_CROUCH_WALK, _PLAYER_STATE_ROLL, _PLAYER_STATE_CROUCH_ATTACKING]
 
 var direction := 1.0
 var life      := LIFETIME
@@ -13,6 +26,7 @@ var life      := LIFETIME
 
 func _ready() -> void:
 	collision_mask = 2  # detecta al jugador (layer 2)
+	z_index = 1   # por debajo del boss (z_index 2 en boss.gd), igual que el mozo
 	_build_visual()
 
 func init(dir: float) -> void:
@@ -41,6 +55,8 @@ func _physics_process(delta: float) -> void:
 		return
 	for body in get_overlapping_bodies():
 		if body.is_in_group("player") and body.has_method("take_damage"):
-			body.take_damage(DMG, direction > 0.0, 0.0)
+			if body.get("state") in _CROUCHED_STATES: continue
+			var real_dmg := 0 if DEBUG_NO_DAMAGE_TO_PLAYER else DMG
+			body.take_damage(real_dmg, direction > 0.0, 0.0)
 			queue_free()
 			return
