@@ -1,5 +1,8 @@
 extends Area2D
 
+const DUST_PUFF_SCENE := preload("res://scenes/vfx/DustPuff.tscn")
+var tex_hit_impact_frames: Array[Texture2D] = []
+
 const SPEED       := 820.0
 const DMG         := 1
 const LIFETIME    := 3.0
@@ -26,8 +29,19 @@ var life      := LIFETIME
 
 func _ready() -> void:
 	collision_mask = 2  # detecta al jugador (layer 2)
-	z_index = 1   # por debajo del boss (z_index 2 en boss.gd), igual que el mozo
+	z_index = 3   # por delante del boss (z_index 2 en boss.gd) — pedido a mano
+	for i in range(1, 7):
+		tex_hit_impact_frames.append(load("res://assets/sprites/vfx/hit_impact/hit_impact_%03d.png" % i))
 	_build_visual()
+
+func _spawn_hit_impact(at_position: Vector2) -> void:
+	var puff := DUST_PUFF_SCENE.instantiate() as Node2D
+	get_parent().add_child(puff)
+	puff.global_position = at_position
+	puff.z_index = 10   # por delante de todo, es un flash de impacto
+	puff.z_as_relative = false
+	if puff.has_method("play"):
+		puff.call("play", tex_hit_impact_frames, 22.0)
 
 func init(dir: float) -> void:
 	direction = dir
@@ -58,5 +72,6 @@ func _physics_process(delta: float) -> void:
 			if body.get("state") in _CROUCHED_STATES: continue
 			var real_dmg := 0 if DEBUG_NO_DAMAGE_TO_PLAYER else DMG
 			body.take_damage(real_dmg, direction > 0.0, 0.0)
+			_spawn_hit_impact(global_position)
 			queue_free()
 			return

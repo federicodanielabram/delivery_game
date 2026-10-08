@@ -13,7 +13,7 @@ var life      := LIFETIME
 @onready var col: CollisionShape2D = $CollisionShape2D
 
 func _ready() -> void:
-	collision_mask = 4   # detecta enemigos (layer 4)
+	collision_mask = 4 | 32   # detecta enemigos (4) y cops-obstáculo de tráfico (32)
 	_build_visual()
 
 func init(dir: float) -> void:

@@ -55,17 +55,12 @@ const SHAKE_AMOUNT       := 9.0    # amplitud inicial del screen shake
 const SHAKE_DECAY        := 45.0
 const SLIDE_HITSTOP_DUR      := 0.05   # freeze más corto que un golpe: la barrida es rápida, no pesada
 const SLIDE_SHAKE_AMOUNT     := 5.0
-const SLIDE_AFTERIMAGE_INTERVAL := 0.045  # cada cuánto larga una copia fantasma mientras desliza
-const SLIDE_AFTERIMAGE_DUR      := 0.16   # cuánto tarda cada copia en desvanecerse
-const SLIDE_DUST_FEET_OFFSET    := 78.0   # altura del emisor de polvo respecto al origen del jugador
 const MAX_HP        := 5
 const IFRAME_DUR    := 1.0    # segundos de invulnerabilidad tras recibir golpe (antes 0.7)
 const DEATH_FADE_DUR := 1.5
 const HIT_RANGE_X   := 112.0  # alcance horizontal del golpe
 const HIT_RANGE_Y   := 52.0   # tolerancia vertical
-const ENEMY_TOUCH_DIST := 88.0  # distancia a la que se considera "chocando" a un enemigo
-
-enum State      { IDLE, WALK, RUN, STOP, RUN_JUMP, JUMP_SQUAT, JUMP, FALL, LAND, JUMP_TO_CROUCH, CROUCH, CROUCH_WALK, STAND, ROLL, ATTACKING, AIR_ATTACKING, CROUCH_ATTACKING, AIR_KICKING, SLIDE, RUN_PUNCH, DEAD, DOUBLE_JUMP }
+enum State      { IDLE, WALK, RUN, STOP, RUN_JUMP, JUMP_SQUAT, JUMP, FALL, LAND, JUMP_TO_CROUCH, CROUCH, CROUCH_WALK, STAND, ROLL, ATTACKING, AIR_ATTACKING, CROUCH_ATTACKING, AIR_KICKING, SLIDE, RUN_PUNCH, DEAD, DOUBLE_JUMP, HURT, KNOCKBACK, GETUP }
 enum AttackType { JAB, HOOK, UPPERCUT, SWEEP, KICK, CROUCH_KICK, AIR_PUNCH, AIR_DOWN_KICK, THROW, FLYING_KICK }
 
 var state          := State.IDLE
@@ -106,14 +101,24 @@ var _fall_from_run            := false
 @onready var sprite:    Sprite2D         = $Sprite2D
 @onready var collision: CollisionShape2D = $CollisionShape2D
 @onready var camera:    Camera2D         = $Camera2D
+@onready var sfx_player: AudioStreamPlayer = $SfxPlayer
+var _sfx_token := 0
+
+const SND_COMBO_1 := preload("res://assets/sounds/player/combo_1.wav")  # jab
+const SND_COMBO_2 := preload("res://assets/sounds/player/combo_2.wav")  # hook
+const SND_COMBO_3 := preload("res://assets/sounds/player/combo_3.wav")  # flying kick (remate)
+const SND_JUMP    := preload("res://assets/sounds/player/jump.wav")
+
+# Retraso entre apretar la tecla y que suene el golpe (ajustar a oído, en segundos).
+const SFX_DELAY_COMBO_1 := 0.0
+const SFX_DELAY_COMBO_2 := 0.16
+const SFX_DELAY_COMBO_3 := 0.00
 
 var shake_amount     := 0.0
 var _cam_base_offset := Vector2.ZERO
 var _hitstop_active  := false
 
 var slide_hit_stopped      := false   # el hitstop/shake del slide dispara una sola vez por barrida
-var slide_afterimage_timer := 0.0
-var _slide_dust: GPUParticles2D = null
 
 @export var has_bengala: bool = false
 var _bengala: Node2D = null
@@ -153,6 +158,11 @@ var air_kick_connected := false
 var air_kick_speed := 0.0   # velocidad del dive: hereda el envión de entrada (mín. AIR_KICK_FORWARD)
 
 const CAN_SCENE := preload("res://scenes/Can.tscn")
+const DUST_PUFF_SCENE := preload("res://scenes/vfx/DustPuff.tscn")
+var tex_dust_run_start_frames: Array[Texture2D] = []
+var tex_dust_land_frames: Array[Texture2D] = []
+var tex_dust_jump_frames: Array[Texture2D] = []
+var tex_hit_impact_frames: Array[Texture2D] = []
 const THROW_FRAMES     := 50
 const THROW_FPS        := 88.0
 const THROW_SPAWN_FRAME := 19   # frame donde suelta la lata
@@ -189,6 +199,41 @@ var tex_idle_frames: Array[Texture2D] = []
 var idle_frame_index  := 0
 var idle_frame_timer  := 0.0
 const IDLE_FPS := 30.0
+
+var tex_hurt_frames: Array[Texture2D] = []
+var hurt_frame_index  := 0
+var hurt_frame_timer  := 0.0
+const HURT_FRAMES      := 73   # carpeta completa (video sin recortar), pero solo se reproduce el rango útil
+const HURT_START_FRAME := 18   # frame19 (1-based) del video: arranca el impacto/retroceso
+const HURT_END_FRAME   := 55   # frame56 (1-based): flinch más marcado, se congela ahí
+const HURT_FPS         := 48.0 # 2x velocidad natural (24fps→48fps): mismos frames reales, sin saltear ninguno, solo se muestran menos tiempo cada uno
+
+# ── Knockback (patada de contragolpe del boss: sale volando y se desliza tirado) ──
+# Estado separado del HURT normal (flinch parado) — este es el PP volando/cayendo/
+# deslizándose por el piso, mucho más dramático. Se dispara SOLO desde
+# apply_forced_knockback() (la patada de contragolpe del boss), no desde take_damage().
+var tex_knockback_frames: Array[Texture2D] = []
+var knockback_frame_index  := 0
+var knockback_frame_timer  := 0.0
+const KNOCKBACK_FRAMES      := 97    # carpeta completa (video sin recortar), pero solo se reproduce el rango útil
+const KNOCKBACK_START_FRAME := 7     # frame8 (1-based) del video: arranca el vuelo por la patada
+const KNOCKBACK_END_FRAME   := 62    # frame63 (1-based): fin del deslizamiento, se congela ahí
+const KNOCKBACK_FPS         := 86.67 # 55 pasos (56 frames del rango) calzados contra el hitstun real de esta patada: ya sin desaceleración (ver apply_forced_knockback), KICK_KNOCKBACK(660)/1040 ≈ 0.6346s → 55/0.6346 ≈ 86.67fps (el doble que antes, misma distancia en la mitad del tiempo)
+
+# ── Getup (levantada tras el knockback) ─────────────────────────────────────
+# Reusa los frames 13-32 de slide_v2 (la secuencia real "slide→run" del video 2,
+# después del frame de congelado a mano) — misma silueta tirado→de pie, así que
+# sirve para pasar de KNOCKBACK a RUN/IDLE en vez de cortar seco a IDLE.
+# Arranca cuando termina el hitstun de KNOCKBACK (ver el bloque de hitstun en
+# _physics_process) y bloquea el input con su propio early-return, igual que
+# el hitstun — al terminar, decide RUN o IDLE según el input de dirección,
+# misma lógica que el final de _handle_slide().
+var tex_getup_frames: Array[Texture2D] = []
+var getup_frame_index  := 0
+var getup_frame_timer  := 0.0
+const GETUP_FRAMES    := 20    # copiado de slide_v2/slide_013..032
+const GETUP_END_FRAME := 19    # último índice (0-based) del array
+const GETUP_FPS        := 120.0 # misma velocidad que SLIDE_EXIT_FPS (mismo footage, mismo ritmo ya validado)
 
 var tex_walk_frames: Array[Texture2D] = []
 var walk_frame_index  := 0
@@ -241,17 +286,19 @@ var _dj_buffered_down_kick   := false
 # ── Slide (pop-up slide de béisbol) ──────────────────────────────────────────
 # Se dispara desde RUN + agacharse + dirección. El pj se tira, se desliza con
 # los pies adelante barriendo enemigos (los atraviesa, hitbox baja) y se levanta
-# de nuevo a RUN. Índices 0-based sobre los 97 frames de slide/:
-#   0-16 corre · 17-20 se tira · 21-49 barrida feet-first · 50-63 se levanta · 64+ corre
+# de nuevo a RUN. Soltó ↓ → vuelve a run al toque, SALVO bajo un auto aéreo
+# (debe cruzarlo completo). Índices 0-based sobre los 43 frames de slide_v2/:
+#   0-10 clavado (video 1, frames 22-32) · 11 hold armado a mano (no viene del
+#   video, congelado SLIDE_HOLD_DUR seg) · 12-42 levantada (video 2, frames 30-60)
 const SLIDE_FPS         := 72.0  # rápido para entrar al frame de congelado
-const SLIDE_EXIT_FPS    := 120.0 # salida del congelado a la levantada/run (ahora el FPS sí manda)
-const SLIDE_START_FRAME := 17    # arranca el clavado
-const SLIDE_HOLD_FRAME  := 29    # slide_030: se congela acá deslizándose por el piso
+const SLIDE_EXIT_FPS    := 120.0 # salida del congelado a la levantada/run
+const SLIDE_START_FRAME := 0     # arranca el clavado
+const SLIDE_HOLD_FRAME  := 11    # slide_012: frame armado a mano (no viene del video), se congela acá
 const SLIDE_HOLD_DUR    := 0.65  # cuánto se queda agachado deslizándose (subir = más largo)
-const SLIDE_HIT_END     := 49    # último frame que barre (fin del deslizamiento)
-const SLIDE_END_FRAME   := 73    # slide_074: último frame que se reproduce (75+ deshabilitados) → empalma con RUN
-const SLIDE_CROUCHWALK_FRAME := 60 # slide_061: si encadenás a caminar agachado, corta acá sin terminar de pararse
-const SLIDE_HIT_KB      := 0.0   # 0 = enemigo plantado (consistente con el combo)
+const SLIDE_HIT_END     := 23    # último frame que barre (todavía bajo, apoyando manos)
+const SLIDE_END_FRAME   := 31    # slide_032: último frame que se reproduce → empalma con RUN (igual que el corte por CROUCHWALK, mismo ritmo soltando ↓ o por timeout)
+const SLIDE_CROUCHWALK_FRAME := 31 # si encadenás a caminar agachado, corta acá sin terminar de pararse
+const SLIDE_HIT_KB       := 0.0   # 0 = enemigo plantado (consistente con el combo)
 const SLIDE_RANGE       := 96.0  # alcance de la barrida — igual para todos, cops incluidos:
 								  # tiene que verse tocar de verdad, no matar desde lejos
 var tex_slide_frames: Array[Texture2D] = []
@@ -313,6 +360,12 @@ func _ready() -> void:
 		tex_throw_frames.append(load("res://assets/sprites/player/throw_cans/throw_cans_%03d.png" % i))
 	for i in range(1, 40):
 		tex_idle_frames.append(load("res://assets/sprites/player/idle/idle__%03d.png" % i))
+	for i in range(1, HURT_FRAMES + 1):
+		tex_hurt_frames.append(load("res://assets/sprites/player/hurt/hurt_%03d.png" % i))
+	for i in range(1, KNOCKBACK_FRAMES + 1):
+		tex_knockback_frames.append(load("res://assets/sprites/player/knockback/knockback_%03d.png" % i))
+	for i in range(1, GETUP_FRAMES + 1):
+		tex_getup_frames.append(load("res://assets/sprites/player/getup/getup_%03d.png" % i))
 	for i in range(1, 51):
 		tex_walk_frames.append(load("res://assets/sprites/player/walk/walk_%03d.png" % i))
 	for i in range(1, 21):
@@ -333,10 +386,18 @@ func _ready() -> void:
 		tex_stand_frames.append(load("res://assets/sprites/player/stand/stand___%03d.png" % i))
 	for i in range(1, 27):
 		tex_crouch_walk_frames.append(load("res://assets/sprites/player/crouch_walk/crouch_walk___%03d.png" % i))
-	for i in range(1, 98):
-		tex_slide_frames.append(load("res://assets/sprites/player/slide/slide_%03d.png" % i))
+	for i in range(1, 44):
+		tex_slide_frames.append(load("res://assets/sprites/player/slide_v2/slide_%03d.png" % i))
 	for i in range(1, 98):
 		tex_run_punch_frames.append(load("res://assets/sprites/player/run_punch/run_punch_%03d.png" % i))
+	for i in range(1, 8):
+		tex_dust_run_start_frames.append(load("res://assets/sprites/vfx/dust_run_start/dust_run_start_%03d.png" % i))
+	for i in range(1, 6):
+		tex_dust_land_frames.append(load("res://assets/sprites/vfx/dust_land/dust_land_%03d.png" % i))
+	for i in range(1, 10):
+		tex_dust_jump_frames.append(load("res://assets/sprites/vfx/dust_jump/dust_jump_%03d.png" % i))
+	for i in range(1, 7):
+		tex_hit_impact_frames.append(load("res://assets/sprites/vfx/hit_impact/hit_impact_%03d.png" % i))
 	sprite.texture = tex_idle_frames[0]
 	if not InputMap.has_action("nitro"):
 		InputMap.add_action("nitro")
@@ -344,7 +405,6 @@ func _ready() -> void:
 		ev.keycode = KEY_SPACE
 		InputMap.action_add_event("nitro", ev)
 	_create_shadow()
-	_create_slide_dust()
 	if has_bengala:
 		_create_bengala()
 
@@ -380,7 +440,51 @@ func _physics_process(delta: float) -> void:
 	if hitstun_timer > 0.0:
 		hitstun_timer -= delta
 		velocity.x    = knockback_vel
-		knockback_vel = move_toward(knockback_vel, 0.0, 520.0 * delta)
+		# KNOCKBACK (patada de contragolpe del boss) vuela a velocidad CONSTANTE,
+		# sin frenar — ver apply_forced_knockback(): la duración ya está calculada
+		# para que, sin desaceleración, recorra la misma distancia que antes (con
+		# frenado lineal) en la mitad del tiempo. HURT (golpes normales) sigue
+		# frenando como siempre.
+		if state != State.KNOCKBACK:
+			knockback_vel = move_toward(knockback_vel, 0.0, 520.0 * delta)
+		if hitstun_timer <= 0.0:
+			if state == State.HURT:
+				state            = State.IDLE
+				idle_frame_index = 0
+				idle_frame_timer = 0.0
+			elif state == State.KNOCKBACK:
+				state              = State.GETUP
+				getup_frame_index  = 0
+				getup_frame_timer  = 0.0
+				velocity.y         = 0.0   # corta cualquier resto vertical del arco — aterriza en seco, sin patinazo
+				knockback_vel      = 0.0   # nunca decayó durante el vuelo (ver arriba) — si no se corta acá,
+											# queda congelado en su valor máximo y se aplica recién al volver
+											# a RUN/IDLE normal (ahí es donde SÍ se decae, al final de
+											# _physics_process), empujando al PP hacia el borde de la arena
+		_update_collision()
+		_update_sprite()
+		move_and_slide()
+		return
+
+	# Levantada tras el knockback (frames reusados de slide_v2) — mismo trato que
+	# el hitstun: input bloqueado, la única entrada que se lee es la dirección al
+	# terminar, para decidir si sigue a RUN o se queda en IDLE (igual que el final
+	# de _handle_slide()).
+	if state == State.GETUP:
+		velocity.x = 0.0
+		if getup_frame_index >= GETUP_END_FRAME:
+			var dir := Input.get_axis("ui_left", "ui_right")
+			if dir != 0.0:
+				facing_right    = dir > 0.0
+				sprite.flip_h   = not facing_right
+				run_frame_index = 0
+				run_frame_timer = 0.0
+				velocity.x      = dir * MAX_SPEED
+				state           = State.RUN
+			else:
+				state            = State.IDLE
+				idle_frame_index = 0
+				idle_frame_timer = 0.0
 		_update_collision()
 		_update_sprite()
 		move_and_slide()
@@ -418,12 +522,10 @@ func _physics_process(delta: float) -> void:
 	_update_collision()
 	_update_sprite()
 	_update_aerial_shadow(delta)
-	_separate_from_enemies(delta)
 	# Aplicar y decaer knockback del jugador
 	velocity.x += knockback_vel
 	knockback_vel = move_toward(knockback_vel, 0.0, 520.0 * delta)
 	_update_shake(delta)
-	_update_slide_fx(delta)
 	move_and_slide()
 
 	# Trackear superficie — después de move_and_slide() para tener colisiones actualizadas
@@ -465,6 +567,24 @@ func _tick_timers(delta: float) -> void:
 		if idle_frame_timer >= 1.0 / IDLE_FPS:
 			idle_frame_timer -= 1.0 / IDLE_FPS
 			idle_frame_index = (idle_frame_index + 1) % tex_idle_frames.size()
+	if state == State.HURT:
+		if hurt_frame_index < HURT_END_FRAME:
+			hurt_frame_timer += delta
+			if hurt_frame_timer >= 1.0 / HURT_FPS:
+				hurt_frame_timer -= 1.0 / HURT_FPS
+				hurt_frame_index = mini(hurt_frame_index + 1, HURT_END_FRAME)
+	if state == State.KNOCKBACK:
+		if knockback_frame_index < KNOCKBACK_END_FRAME:
+			knockback_frame_timer += delta
+			if knockback_frame_timer >= 1.0 / KNOCKBACK_FPS:
+				knockback_frame_timer -= 1.0 / KNOCKBACK_FPS
+				knockback_frame_index = mini(knockback_frame_index + 1, KNOCKBACK_END_FRAME)
+	if state == State.GETUP:
+		if getup_frame_index < GETUP_END_FRAME:
+			getup_frame_timer += delta
+			if getup_frame_timer >= 1.0 / GETUP_FPS:
+				getup_frame_timer -= 1.0 / GETUP_FPS
+				getup_frame_index = mini(getup_frame_index + 1, GETUP_END_FRAME)
 	if state == State.WALK:
 		walk_frame_timer += delta
 		if walk_frame_timer >= 1.0 / WALK_FPS:
@@ -599,9 +719,46 @@ func take_damage(amount: int, from_right: bool, knockback: float = 200.0) -> voi
 	# físico (antes, con knockback=0 como el machetazo del boss, no se
 	# bloqueaba nada). Un empuje grande igual puede extenderlo más allá.
 	hitstun_timer = maxf(IFRAME_DUR, absf(knockback) / 520.0)
-	state         = State.IDLE
+	state         = State.HURT
+	hurt_frame_index = HURT_START_FRAME
+	hurt_frame_timer  = 0.0
 	if hp <= 0:
 		_die()
+
+# Empuje puro, sin pasar por daño ni por el chequeo de iframe — lo usa la
+# patada de contragolpe del boss (ver _hit_player en boss.gd), que resetea la
+# distancia después del remate del combo y tiene que pasar SIEMPRE. Con
+# take_damage() normal, si el PP ya tenía iframe activo por cualquier otro
+# golpe reciente del boss (el machetazo, por ejemplo, aunque sea con 0 de
+# daño/empuje), el empuje se cancelaba en silencio — "la primera patada no me
+# arrastra".
+func apply_forced_knockback(knockback: float, from_right: bool) -> void:
+	if state == State.DEAD: return
+	velocity.x    = 0.0
+	knockback_vel = knockback * (1.0 if from_right else -1.0)
+	# /1040 (no /520): este vuelo ya NO frena (ver el bloque de hitstun en
+	# _physics_process) — sostiene knockback_vel constante. Con frenado lineal
+	# de v0 a 0 la velocidad promedio es v0/2, así que sostener v0 fijo la
+	# MITAD del tiempo (/1040 = /520/2) recorre la misma distancia que antes,
+	# en la mitad del tiempo. Vale para cualquier magnitud de knockback, no
+	# solo la de esta patada.
+	var flight_dur := absf(knockback) / 1040.0
+	# Pisa el valor (no maxf): take_damage(), llamado siempre justo antes desde
+	# _hit_player() en boss.gd, ya puso hitstun_timer con SU propia fórmula
+	# (basada en IFRAME_DUR/520, pensada para el frenado gradual de un HURT
+	# normal) — con maxf, ese valor más largo ganaba siempre y el vuelo seguía
+	# "patinando" a velocidad constante mucho después de aterrizar, en vez de
+	# cortar a GETUP en flight_dur como debería.
+	hitstun_timer = flight_dur
+	# Arco real: despega del piso (gravedad normal, _apply_gravity sigue
+	# corriendo todo el tiempo aunque estemos en hitstun) y vuelve a tocarlo
+	# justo cuando termina flight_dur — tiro parabólico simétrico sobre piso
+	# llano: v0y = GRAVITY*t/2. Toda la distancia horizontal pasa en el aire;
+	# aterriza y pasa directo a GETUP, sin patinazo.
+	velocity.y    = -GRAVITY * flight_dur * 0.5
+	state         = State.KNOCKBACK
+	knockback_frame_index = KNOCKBACK_START_FRAME
+	knockback_frame_timer = 0.0
 
 # ── Golpear enemigos ──────────────────────────────────────────────────────────
 
@@ -614,6 +771,7 @@ func _try_hit_enemies(damage: int) -> void:
 		if abs(dx) < HIT_RANGE_X and dy < HIT_RANGE_Y and (dx > 0.0) == facing_right:
 			if e.has_method("take_damage"):
 				e.call("take_damage", damage, dx < 0.0)
+				_spawn_hit_impact(e.global_position)
 
 # Variante con knockback fuerte y alcance propio; devuelve true si conectó con algún enemigo.
 func _try_hit_enemies_kb(damage: int, knockback: float, range_x: float = HIT_RANGE_X) -> bool:
@@ -626,8 +784,18 @@ func _try_hit_enemies_kb(damage: int, knockback: float, range_x: float = HIT_RAN
 		if abs(dx) < range_x and dy < HIT_RANGE_Y and (dx > 0.0) == facing_right:
 			if e.has_method("take_damage"):
 				e.call("take_damage", damage, dx < 0.0, knockback)
+				_spawn_hit_impact(e.global_position)
 				hit = true
 	return hit
+
+func _spawn_hit_impact(at_position: Vector2) -> void:
+	var puff := DUST_PUFF_SCENE.instantiate() as Node2D
+	get_parent().add_child(puff)
+	puff.global_position = at_position + Vector2(0.0, -60.0)
+	puff.z_index = 10   # por delante de todo, es un flash de impacto
+	puff.z_as_relative = false
+	if puff.has_method("play"):
+		puff.call("play", tex_hit_impact_frames, 22.0)
 
 # Golpe del finisher en el frame de impacto: daño + knockback, y si conecta,
 # hitstop (freeze) + screen shake para que se sienta el karatazo.
@@ -637,6 +805,17 @@ func _flying_kick_impact() -> void:
 		shake_amount = SHAKE_AMOUNT
 		_notify_finisher_hit(FLYING_KICK_RANGE)
 	_try_open_door()
+
+func _play_sfx(stream: AudioStream, delay: float = 0.0) -> void:
+	_sfx_token += 1
+	var my_token := _sfx_token
+	if delay > 0.0:
+		await get_tree().create_timer(delay, false).timeout
+		# Si mientras esperaba se lanzó otro golpe, este sonido ya llegó tarde: no pisar al nuevo.
+		if my_token != _sfx_token:
+			return
+	sfx_player.stream = stream
+	sfx_player.play()
 
 # El remate del combo (este golpe) es el único que hace reaccionar al boss
 # (ver react_to_finisher en boss.gd) — jab/hook y cualquier otro golpe solo le
@@ -652,6 +831,21 @@ func _notify_finisher_hit(range_x: float) -> void:
 		if abs(dx) < range_x and dy < HIT_RANGE_Y and (dx > 0.0) == facing_right:
 			if e.has_method("react_to_finisher"):
 				e.call("react_to_finisher")
+
+# El jab y el hook (1er y 2do golpe del combo) hacen que el boss reaccione con
+# el flinch visual de "hurt" — a diferencia del remate, esto NO resta vida ni
+# encadena el contragolpe de patada (ver react_to_jab en boss.gd). Igual que
+# _notify_finisher_hit, búsqueda separada para no tocar take_damage/
+# _try_hit_enemies (compartidos con el resto de los enemigos).
+func _notify_jab_hit() -> void:
+	for enemy in get_tree().get_nodes_in_group("enemy"):
+		var e := enemy as Node2D
+		if not e: continue
+		var dx: float = e.global_position.x - global_position.x
+		var dy: float = abs(e.global_position.y - global_position.y)
+		if abs(dx) < HIT_RANGE_X and dy < HIT_RANGE_Y and (dx > 0.0) == facing_right:
+			if e.has_method("react_to_jab"):
+				e.call("react_to_jab")
 
 func _do_hitstop(dur: float) -> void:
 	if _hitstop_active: return
@@ -670,6 +864,63 @@ func _update_shake(delta: float) -> void:
 		shake_amount = move_toward(shake_amount, 0.0, SHAKE_DECAY * delta)
 	elif camera.offset != _cam_base_offset:
 		camera.offset = _cam_base_offset
+
+func _spawn_dust_run_start() -> void:
+	var puff := DUST_PUFF_SCENE.instantiate() as Node2D
+	get_parent().add_child(puff)
+	var dir := 1.0 if facing_right else -1.0
+	# Pegado a los pies (el origen del player está al centro de la cápsula de
+	# colisión, altura 115.6 → el piso queda a +57.8 en Y), un poco atrás del
+	# sentido de la corrida.
+	puff.global_position = global_position + Vector2(-dir * 30.0, 42.8)
+	puff.z_index = 1   # claramente debajo del player (z_index 3)
+	puff.z_as_relative = false
+	puff.scale.x = -dir
+	puff.modulate = modulate   # mismo tinte de iluminación (noche) que el PP
+	if puff.has_method("play"):
+		puff.call("play", tex_dust_run_start_frames, 18.0)
+
+func _spawn_dust_slide_start() -> void:
+	var puff := DUST_PUFF_SCENE.instantiate() as Node2D
+	get_parent().add_child(puff)
+	var dir := 1.0 if facing_right else -1.0
+	# Copia de _spawn_dust_run_start() con sus propios offsets, para poder
+	# ajustar el del slide sin tocar el de arrancar a correr.
+	puff.global_position = global_position + Vector2(-dir * 30.0, 42.8)
+	puff.z_index = 1   # claramente debajo del player (z_index 3)
+	puff.z_as_relative = false
+	puff.scale.x = -dir
+	puff.modulate = modulate   # mismo tinte de iluminación (noche) que el PP
+	if puff.has_method("play"):
+		puff.call("play", tex_dust_run_start_frames, 18.0)
+
+func _spawn_dust_land() -> void:
+	var puff := DUST_PUFF_SCENE.instantiate() as Node2D
+	get_parent().add_child(puff)
+	var dir := 1.0 if facing_right else -1.0
+	# Copia de _spawn_dust_run_start()/_spawn_dust_slide_start(): misma altura
+	# (pies del PP), centrado porque el aterrizaje no tiene un lado "de atrás".
+	puff.global_position = global_position + Vector2(dir * 5.0, 72.8)
+	puff.z_index = 1   # claramente debajo del player (z_index 3)
+	puff.z_as_relative = false
+	puff.scale.x = -dir
+	puff.modulate = modulate   # mismo tinte de iluminación (noche) que el PP
+	if puff.has_method("play"):
+		puff.call("play", tex_dust_land_frames, 18.0)
+
+func _spawn_dust_jump() -> void:
+	var puff := DUST_PUFF_SCENE.instantiate() as Node2D
+	get_parent().add_child(puff)
+	var dir := 1.0 if facing_right else -1.0
+	# Copia de las otras _spawn_dust_*(): misma altura que _spawn_dust_land()
+	# (último VFX ajustado).
+	puff.global_position = global_position + Vector2(dir * 5.0, 32.8)
+	puff.z_index = 1   # claramente debajo del player (z_index 3)
+	puff.z_as_relative = false
+	puff.scale.x = -dir
+	puff.modulate = modulate   # mismo tinte de iluminación (noche) que el PP
+	if puff.has_method("play"):
+		puff.call("play", tex_dust_jump_frames, 18.0)
 
 func _spawn_can() -> void:
 	var can := CAN_SCENE.instantiate() as Node2D
@@ -708,6 +959,7 @@ func _start_coyote_jump() -> void:
 	jump_from_idle           = _coyote_grounded_state == State.IDLE
 	velocity.y               = RUN_JUMP_FORCE
 	state                    = State.JUMP
+	_play_sfx(SND_JUMP)
 
 func _handle_ground(delta: float) -> void:
 	# Si el piso desapareció (borde de auto aéreo) → caída libre, sin acciones hasta aterrizar.
@@ -776,6 +1028,7 @@ func _handle_ground(delta: float) -> void:
 			velocity.x = 0.0
 		velocity.y = RUN_JUMP_FORCE
 		state      = State.JUMP
+		_play_sfx(SND_JUMP)
 		return
 
 	# "attack" es el mismo combo en cualquier estado de piso, incluso RUN: se
@@ -817,6 +1070,7 @@ func _handle_ground(delta: float) -> void:
 			if state == State.IDLE or state == State.WALK:
 				run_frame_index = 0
 				run_frame_timer = 0.0
+				_spawn_dust_run_start()
 			velocity.x = move_toward(velocity.x, dir * MAX_SPEED, ACCELERATION * delta)
 			state = State.RUN
 	else:
@@ -993,6 +1247,7 @@ func _handle_stop(delta: float) -> void:
 			run_frame_index = 0
 			run_frame_timer = 0.0
 			state = State.RUN
+			_spawn_dust_run_start()
 		return
 	if Input.is_action_just_pressed("ui_up"):
 		# STOP salta corto como walk/idle (poca distancia horizontal)
@@ -1003,6 +1258,7 @@ func _handle_stop(delta: float) -> void:
 		jump_from_idle   = false
 		velocity.y       = RUN_JUMP_FORCE
 		state            = State.JUMP
+		_play_sfx(SND_JUMP)
 		return
 	velocity.x = move_toward(velocity.x, 0.0, FRICTION * 6.0 * delta)
 	if stop_frame_index >= tex_stop_frames.size() - 1:
@@ -1053,6 +1309,7 @@ func _handle_land(delta: float) -> void:
 		jump_squat_timer = JUMP_SQUAT_DUR
 		velocity.x       = 0.0
 		state            = State.JUMP_SQUAT
+		_play_sfx(SND_JUMP)
 		return
 	var land_max := tex_run_jump_frames.size() - 1 if jump_from_run else tex_jump_frames.size() - 1
 	if jump_frame_index >= land_max:
@@ -1106,14 +1363,12 @@ func _handle_air(delta: float) -> void:
 		air_max = MAX_SPEED * 0.5
 	else:
 		air_max = MAX_SPEED * NITRO_SPEED_MULT if nitro_active else MAX_SPEED
-	if dir != 0.0:
-		# Se puede girar en el aire las veces que quiera. Si invierte la
-		# dirección, la inercia se invierte con él: misma fuerza, otro sentido,
-		# en vez de frenar y volver a acelerar desde cero.
-		facing_right  = dir > 0.0
-		sprite.flip_h = not facing_right
-		if sign(dir) != sign(velocity.x) and absf(velocity.x) > 1.0:
-			velocity.x = -velocity.x
+	# La dirección queda fijada a la que ya traía al despegar — no se puede dar
+	# vuelta en el aire. Mientras se sostenga esa MISMA dirección, se puede
+	# seguir acelerando/frenando con normalidad; cualquier otra cosa (soltar,
+	# o apretar la opuesta) frena igual que si no hubiera input.
+	var locked_dir := 1.0 if facing_right else -1.0
+	if dir == locked_dir:
 		if is_on_wall():
 			velocity.x = move_toward(velocity.x, 0.0, AIR_BRAKE * delta)
 		else:
@@ -1128,6 +1383,7 @@ func _handle_air(delta: float) -> void:
 		double_jump_frame_timer  = 0.0
 		velocity.y               = DOUBLE_JUMP_FORCE
 		state                    = State.DOUBLE_JUMP
+		_play_sfx(SND_JUMP)
 		_dj_buffered_kick        = false
 		_dj_buffered_down_kick   = false
 		return
@@ -1149,6 +1405,7 @@ func _handle_air(delta: float) -> void:
 		return
 
 	if is_on_floor():
+		_spawn_dust_land()
 		if Input.is_action_pressed("ui_down"):
 			var land_dir := Input.get_axis("ui_left", "ui_right")
 			if land_dir != 0.0:
@@ -1201,12 +1458,11 @@ func _handle_double_jump(delta: float) -> void:
 			double_jump_frame_timer -= 1.0 / DOUBLE_JUMP_FPS
 			double_jump_frame_index = mini(double_jump_frame_index + 1, DOUBLE_JUMP_LAST_FRAME)
 
+	# Dirección fijada a la de despegue (ver _handle_air) — se puede acelerar/
+	# frenar en esa misma dirección, pero no invertirla en el aire.
 	var dir := Input.get_axis("ui_left", "ui_right")
-	if dir != 0.0:
-		facing_right  = dir > 0.0
-		sprite.flip_h = not facing_right
-		if sign(dir) != sign(velocity.x) and absf(velocity.x) > 1.0:
-			velocity.x = -velocity.x
+	var locked_dir := 1.0 if facing_right else -1.0
+	if dir == locked_dir:
 		velocity.x = move_toward(velocity.x, dir * MAX_SPEED, 800.0 * delta)
 	else:
 		velocity.x = move_toward(velocity.x, 0.0, FRICTION * delta * 0.3)
@@ -1246,18 +1502,23 @@ func _launch_combo() -> void:
 			jab_frame_index = 0
 			jab_frame_timer = 0.0
 			_start_attack(AttackType.JAB,      COMBO_HIT_DUR, COMBO_WINDOW)
+			_play_sfx(SND_COMBO_1, SFX_DELAY_COMBO_1)
 		1:
 			hook_frame_index = 0
 			hook_frame_timer = 0.0
 			_start_attack(AttackType.HOOK,     COMBO_HIT_DUR, COMBO_WINDOW)
+			_play_sfx(SND_COMBO_2, SFX_DELAY_COMBO_2)
 		2:
 			flying_kick_frame_index = 0
 			flying_kick_frame_timer = 0.0
 			flying_kick_hit_done = false
 			_start_attack(AttackType.FLYING_KICK, float(FLYING_KICK_FRAMES) / FLYING_KICK_FPS, 0.0)
+			_play_sfx(SND_COMBO_3, SFX_DELAY_COMBO_3)
 			_try_open_door()
 			return  # el golpe se registra en el frame de impacto (con hitstop + shake)
 	_try_hit_enemies(dmg)
+	if combo_step == 0 or combo_step == 1:
+		_notify_jab_hit()
 	_try_open_door()
 
 func _start_attack(type: AttackType, duration: float, window: float) -> void:
@@ -1296,12 +1557,11 @@ func _handle_attacking(delta: float) -> void:
 			state = State.IDLE if is_on_floor() else State.FALL
 
 func _handle_air_attacking(delta: float) -> void:
+	# Dirección fijada a la de despegue (ver _handle_air) — se puede acelerar/
+	# frenar en esa misma dirección, pero no invertirla en el aire.
 	var dir := Input.get_axis("ui_left", "ui_right")
-	if dir != 0.0:
-		facing_right  = dir > 0.0
-		sprite.flip_h = not facing_right
-		if sign(dir) != sign(velocity.x) and absf(velocity.x) > 1.0:
-			velocity.x = -velocity.x
+	var locked_dir := 1.0 if facing_right else -1.0
+	if dir == locked_dir:
 		velocity.x = move_toward(velocity.x, dir * MAX_SPEED, ACCELERATION * delta * 0.4)
 
 	attack_timer -= delta
@@ -1340,13 +1600,11 @@ func _handle_air_kicking(delta: float) -> void:
 		idle_frame_timer  = 0.0
 		state             = State.IDLE
 		return
-	# Se puede girar en el aire durante la patada, igual que en un salto normal.
+	# Dirección fijada a la de despegue (ver _handle_air) — se puede acelerar/
+	# frenar en esa misma dirección durante la patada, pero no invertirla.
 	var air_dir := Input.get_axis("ui_left", "ui_right")
-	if air_dir != 0.0:
-		facing_right  = air_dir > 0.0
-		sprite.flip_h = not facing_right
-		if sign(air_dir) != sign(velocity.x) and absf(velocity.x) > 1.0:
-			velocity.x = -velocity.x
+	var locked_dir := 1.0 if facing_right else -1.0
+	if air_dir == locked_dir:
 		velocity.x = move_toward(velocity.x, air_dir * (MAX_SPEED * 0.5), AIR_BRAKE * delta)
 	# Golpe: al llegar a la pierna extendida sigue chequeando enemigos hasta conectar.
 	if not air_kick_connected and air_kick_frame_index >= AIR_KICK_IMPACT:
@@ -1362,6 +1620,13 @@ func _handle_air_kicking(delta: float) -> void:
 					e.call("take_weakness_damage", dx < 0.0)
 				elif e.has_method("take_damage"):
 					e.call("take_damage", 2, dx < 0.0, AIR_KICK_KB)
+				_spawn_hit_impact(e.global_position)
+				# Contra el boss (take_damage normal no le hace nada, ver boss.gd):
+				# la patada aérea cuenta como remate — resta vida de verdad Y
+				# dispara el flinch/contragolpe, igual que el 3er golpe del combo
+				# de piso (ver _notify_finisher_hit).
+				if e.has_method("react_to_finisher"):
+					e.call("react_to_finisher")
 				hit = true
 				if e.get("obstacle_mode"):
 					hit_cop = true
@@ -1423,34 +1688,31 @@ func _start_slide(dir: float) -> void:
 	slide_hit_stopped = false
 	velocity.x        = slide_dir * maxf(MAX_SPEED, absf(velocity.x))  # hereda el envión
 	state             = State.SLIDE
-	if _slide_dust:
-		var mat := _slide_dust.process_material as ParticleProcessMaterial
-		if mat:
-			mat.direction = Vector3(-slide_dir, -0.35, 0.0)  # el polvo sale para atrás, contra el avance
+	_spawn_dust_slide_start()
 
 func _handle_slide(delta: float) -> void:
-	# Soltó ↓ → vuelve a run, SALVO que esté bajo un auto aéreo (debe cruzarlo completo).
-	if not Input.is_action_pressed("ui_down") and not _is_under_aerial_car():
-		run_frame_index = 0
-		run_frame_timer = 0.0
-		velocity.x      = slide_dir * (MAX_SPEED * NITRO_SPEED_MULT if nitro_active else MAX_SPEED)
-		state           = State.RUN
-		return
-
 	# Se desplaza a la MISMA velocidad que el run, constante, durante todo el slide.
 	velocity.x = slide_dir * (MAX_SPEED * NITRO_SPEED_MULT if nitro_active else MAX_SPEED)
 
-	# Avance de frames rápido, pero se congela en SLIDE_HOLD_FRAME (slide_030)
-	# durante SLIDE_HOLD_DUR mientras sigue deslizándose por el piso.
-	if slide_frame_index == SLIDE_HOLD_FRAME and slide_hold_timer < SLIDE_HOLD_DUR:
+	# Mientras sostengas ↓ (o estés bajo un auto aéreo, que hay que cruzar
+	# completo) queda CONGELADO en SLIDE_HOLD_FRAME. Al SOLTAR ↓ (o pasado
+	# SLIDE_HOLD_DUR como tope de seguridad si no soltás) arranca la
+	# levantada animada hasta SLIDE_END_FRAME, en vez de cortar al instante.
+	var holding := Input.is_action_pressed("ui_down") or _is_under_aerial_car()
+	if slide_frame_index >= SLIDE_HOLD_FRAME and holding and slide_hold_timer < SLIDE_HOLD_DUR:
+		slide_frame_index = SLIDE_HOLD_FRAME
 		slide_hold_timer += delta
 	else:
-		# Al salir del congelado (frame 30 en adelante) va mucho más rápido a run.
+		# Al salir del congelado va mucho más rápido a run.
 		# while (no if): permite avanzar varios frames por tick de física, así FPS > 60
 		# realmente acelera la animación en vez de quedar capado a la tasa de física.
+		# El tope (cap) es el propio SLIDE_HOLD_FRAME mientras sigas sosteniendo
+		# ↓ y no se cumplió el hold todavía — así el avance no puede pasarse de
+		# largo del frame de congelado ni con un delta grande (hitch de física).
 		var sfps := SLIDE_EXIT_FPS if slide_frame_index >= SLIDE_HOLD_FRAME else SLIDE_FPS
+		var cap  := SLIDE_END_FRAME if (not holding or slide_hold_timer >= SLIDE_HOLD_DUR) else SLIDE_HOLD_FRAME
 		slide_frame_timer += delta
-		while slide_frame_timer >= 1.0 / sfps and slide_frame_index < SLIDE_END_FRAME:
+		while slide_frame_timer >= 1.0 / sfps and slide_frame_index < cap:
 			slide_frame_timer -= 1.0 / sfps
 			slide_frame_index += 1
 
@@ -1459,8 +1721,7 @@ func _handle_slide(delta: float) -> void:
 		_slide_sweep()
 
 	# Encadena directo a caminar agachado: si venís apretando ↓ + dirección no hace falta
-	# terminar de pararse, cortá en SLIDE_CROUCHWALK_FRAME (slide_062) y pasá a crouch-walk.
-	# Excepción: si el slide vino de RUN, soltar ↓ encadena directo a RUN.
+	# terminar de pararse, cortá en SLIDE_CROUCHWALK_FRAME y pasá a crouch-walk.
 	if slide_frame_index >= SLIDE_CROUCHWALK_FRAME and Input.is_action_pressed("ui_down"):
 		var cw_dir := Input.get_axis("ui_left", "ui_right")
 		if cw_dir != 0.0:
@@ -1536,59 +1797,6 @@ func _slide_sweep() -> void:
 				slide_hit_stopped = true
 				_do_hitstop(SLIDE_HITSTOP_DUR)
 				shake_amount = SLIDE_SHAKE_AMOUNT
-
-# ── Efectos visuales del slide (polvo + afterimages) ─────────────────────────
-
-func _create_slide_dust() -> void:
-	_slide_dust = GPUParticles2D.new()
-	_slide_dust.z_index      = -1
-	_slide_dust.position     = Vector2(0.0, SLIDE_DUST_FEET_OFFSET)
-	_slide_dust.local_coords = false   # una vez emitida, la partícula queda en el mundo (no viaja con el jugador)
-	_slide_dust.emitting     = false
-	_slide_dust.amount       = 16
-	_slide_dust.lifetime     = 0.35
-	_slide_dust.texture      = _radial_texture(24, Color(0.78, 0.74, 0.68))
-	var mat := ParticleProcessMaterial.new()
-	mat.direction             = Vector3(-1.0, -0.35, 0.0)  # se corrige por lado en _start_slide()
-	mat.spread                = 18.0
-	mat.initial_velocity_min  = 60.0
-	mat.initial_velocity_max  = 140.0
-	mat.gravity               = Vector3(0.0, 260.0, 0.0)
-	mat.scale_min             = 0.5
-	mat.scale_max             = 1.1
-	var fade := Gradient.new()
-	fade.set_color(0, Color(0.8, 0.78, 0.72, 0.55))
-	fade.set_color(1, Color(0.8, 0.78, 0.72, 0.0))
-	var ramp := GradientTexture1D.new()
-	ramp.gradient    = fade
-	mat.color_ramp   = ramp
-	_slide_dust.process_material = mat
-	add_child(_slide_dust)
-
-# Prende/apaga polvo y afterimages según el estado, centralizado acá para no
-# tener que tocar cada punto de salida de _handle_slide().
-func _update_slide_fx(delta: float) -> void:
-	if _slide_dust:
-		_slide_dust.emitting = (state == State.SLIDE)
-	if state == State.SLIDE:
-		slide_afterimage_timer += delta
-		if slide_afterimage_timer >= SLIDE_AFTERIMAGE_INTERVAL:
-			slide_afterimage_timer = 0.0
-			_spawn_slide_afterimage()
-	else:
-		slide_afterimage_timer = 0.0
-
-func _spawn_slide_afterimage() -> void:
-	var ghost := Sprite2D.new()
-	ghost.texture         = sprite.texture
-	ghost.flip_h          = sprite.flip_h
-	ghost.global_position = sprite.global_position
-	ghost.z_index         = z_index - 1
-	ghost.modulate        = Color(0.55, 0.85, 1.0, 0.35)  # tinte cyan, consistente con el look cyberpunk
-	get_parent().add_child(ghost)
-	var tw := ghost.create_tween()
-	tw.tween_property(ghost, "modulate:a", 0.0, SLIDE_AFTERIMAGE_DUR)
-	tw.tween_callback(ghost.queue_free)
 
 # ── Puñetazo corriendo (run punch) ───────────────────────────────────────────
 
@@ -1675,6 +1883,7 @@ func _handle_nitro_run(_delta: float) -> void:
 		jump_from_idle   = false
 		velocity.y       = RUN_JUMP_FORCE
 		state            = State.JUMP
+		_play_sfx(SND_JUMP)
 		return
 	velocity.x = (1.0 if facing_right else -1.0) * MAX_SPEED * NITRO_SPEED_MULT
 
@@ -1702,26 +1911,39 @@ func _update_collision() -> void:
 		cap.radius           = 12.0
 		collision.position.y = 23.8
 		collision.position.x = 10.0 if facing_right else -10.0
-	# Agachado/slide: ignora autos aéreos y cops (layer 3 = bit 4) para poder
-	# pasar por debajo/atravesarlos con la barrida.
+	# Agachado/slide: ignora autos aéreos (8) y cops-obstáculo de tráfico (32)
+	# para poder pasar por debajo/atravesarlos con la barrida — pero SÍ choca
+	# de verdad contra los enemigos de combate real (4: boss/mozo/thug/cop no-
+	# obstáculo), física nativa de Godot, nadie empuja a nadie, sin scripts.
 	# +16 (WALL_LAYER, ver level1.gd) en los tres casos: las paredes invisibles
 	# de la arena del boss tienen que frenar al PP siempre, sin importar el
-	# estado — a diferencia de cops/autos, nunca hay que poder atravesarlas.
+	# estado — a diferencia de cops-obstáculo/autos, nunca hay que poder
+	# atravesarlas.
 	if state == State.SLIDE or state == State.CROUCH or state == State.CROUCH_WALK \
 			or state == State.ROLL or state == State.CROUCH_ATTACKING:
-		collision_mask = 1 | 16
+		collision_mask = 1 | 4 | 16
 	elif is_on_floor():
-		# En el piso, un cop vivo bloquea como un colectivo — no hay forma de
-		# atravesarlo corriendo, hay que matarlo (slide/salto+patada) o rodearlo.
-		collision_mask = 13 | 16   # 1 (piso/autos) + 4 (cops) + 8 (autos aéreos) + 16 (paredes arena)
+		# En el piso, un cop-obstáculo vivo bloquea como un colectivo — no hay
+		# forma de atravesarlo corriendo, hay que matarlo (slide/salto+patada)
+		# o rodearlo. Boss/mozo/thug (4) ya quedan cubiertos arriba también.
+		collision_mask = 13 | 16 | 32   # 1 (piso/autos) + 4 (enemigos reales) + 8 (autos aéreos) + 16 (paredes arena) + 32 (cops-obstáculo)
 	else:
-		collision_mask = 9 | 16   # en el aire: sin cops, para poder saltarlos por encima
+		collision_mask = 9 | 4 | 16   # en el aire: choca contra enemigos reales (boss/mozo) igual que en el piso, sin cops-obstáculo
 
 func _update_sprite() -> void:
 	match state:
 		State.IDLE:
 			if tex_idle_frames.size() > 0:
 				sprite.texture = tex_idle_frames[idle_frame_index]
+		State.HURT:
+			if tex_hurt_frames.size() > 0:
+				sprite.texture = tex_hurt_frames[hurt_frame_index]
+		State.KNOCKBACK:
+			if tex_knockback_frames.size() > 0:
+				sprite.texture = tex_knockback_frames[knockback_frame_index]
+		State.GETUP:
+			if tex_getup_frames.size() > 0:
+				sprite.texture = tex_getup_frames[getup_frame_index]
 		State.WALK:
 			if tex_walk_frames.size() > 0:
 				sprite.texture = tex_walk_frames[walk_frame_index]
@@ -1791,6 +2013,8 @@ func _update_sprite() -> void:
 
 	if state == State.DEAD:
 		sprite.modulate.a = death_timer / DEATH_FADE_DUR
+	elif state == State.HURT or state == State.KNOCKBACK or state == State.GETUP:
+		sprite.modulate.a = 1.0
 	else:
 		sprite.modulate.a = 0.35 if (iframe_timer > 0.0 and int(iframe_timer * 10) % 2 == 0) else 1.0
 
@@ -1837,7 +2061,7 @@ func _shadow_ground_y() -> float:
 	var space := get_world_2d().direct_space_state
 	var params := PhysicsRayQueryParameters2D.create(
 		global_position, global_position + Vector2(0.0, 3000.0))
-	params.collision_mask = 13   # piso/autos (1) + cops (4) + autos aéreos (8): todo lo pisable
+	params.collision_mask = 13 | 32   # piso/autos (1) + enemigos reales (4) + autos aéreos (8) + cops-obstáculo (32): todo lo pisable
 	params.exclude        = [get_rid()]
 	var hit := space.intersect_ray(params)
 	if hit.is_empty():
@@ -1854,8 +2078,13 @@ func _update_shadow() -> void:
 	var air_h := maxf(0.0, _shadow_floor_y - (global_position.y + SHADOW_FEET_OFFSET))
 	var t := clampf(air_h / SHADOW_MAX_HEIGHT, 0.0, 1.0)
 	var fade  := lerpf(1.0, 0.3, t)
-	var left  := SHADOW_LEFT_OFFSET * fade
-	var right := SHADOW_RIGHT_OFFSET * fade
+	# LEFT/RIGHT son asimétricos (offset "de frente" vs "de espalda") — al dar
+	# vuelta hay que intercambiarlos, si no la sombra se queda corrida siempre
+	# para el mismo lado sin importar hacia dónde mira ahora el PP.
+	var front := SHADOW_RIGHT_OFFSET * fade
+	var back  := SHADOW_LEFT_OFFSET * fade
+	var left  := back if facing_right else front
+	var right := front if facing_right else back
 	var sx    := (left + right) / SHADOW_CONTENT.size.x
 	var sy    := (SHADOW_TOP_OFFSET + SHADOW_BOT_OFFSET) / SHADOW_CONTENT.size.y
 	_shadow.scale = Vector2(sx, sy)
@@ -1889,29 +2118,13 @@ func _radial_texture(size: int, color: Color) -> ImageTexture:
 
 # ── Detección de puertas ──────────────────────────────────────────────────────
 
-func _separate_from_enemies(_delta: float) -> void:
-	if not is_on_floor(): return
-	for enemy in get_tree().get_nodes_in_group("enemy"):
-		var e := enemy as Node2D
-		if not e: continue
-		# Cops-obstáculo de la línea del medio: se resuelven con slide/air-kick
-		# o bloquean como un colectivo (ver collision_mask en _update_collision),
-		# nunca con este empuje — si no, esto frena/rebota al jugador contra un
-		# enemigo parado sin usar ningún collider (la "pared invisible").
-		if e.get("obstacle_mode") == true: continue
-		var col := e.get_node_or_null("CollisionShape2D") as CollisionShape2D
-		if col and col.disabled: continue
-		var dx: float = global_position.x - e.global_position.x
-		var overlap: float = ENEMY_TOUCH_DIST - abs(dx)
-		if overlap > 0.0:
-			var push: float = sign(dx) if abs(dx) > 0.5 else 1.0
-			global_position.x += push * overlap * 0.75
-			if state == State.SLIDE:
-				velocity.x        = 0.0
-				slide_hold_timer  = SLIDE_HOLD_DUR
-				slide_frame_index = SLIDE_END_FRAME
-			else:
-				velocity.x = push * absf(velocity.x + 20.0)
+# El choque contra boss/mozo/thug durante SLIDE/CROUCH ya no se resuelve acá:
+# se probó con un clamp manual (leer cápsulas, predecir posición, etc.) y
+# terminaba siendo frágil — la solución real fue separar a los cops-obstáculo
+# de tráfico a su propia capa física (32, ver cop.gd) para poder darle a
+# SLIDE/CROUCH colisión real contra la capa de enemigos (4) sin romper el
+# paso por debajo de esos cops (ver _update_collision). Ahora es Godot el que
+# frena, nativo: nadie empuja a nadie, sin aproximaciones a mano.
 
 func _floor_nearby(dist: float) -> bool:
 	var space := get_world_2d().direct_space_state

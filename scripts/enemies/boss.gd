@@ -1,5 +1,9 @@
 extends CharacterBody2D
 
+const DUST_PUFF_SCENE := preload("res://scenes/vfx/DustPuff.tscn")
+var tex_hit_impact_frames: Array[Texture2D] = []
+var tex_knockback_dust_frames: Array[Texture2D] = []
+
 const GRAVITY        := 850.0
 const MAX_HP         := 5
 const MOVE_SPEED     := 45.0
@@ -82,9 +86,8 @@ const WALK_MOVE_START     := 10
 # lo mismo a la velocidad de intro que a MOVE_SPEED. = 80 * 45 / 24 = 150px.
 const WALK_MOVE_FRAMES        := WALK_FRAMES - WALK_MOVE_START
 const WALK_ADVANCE_PER_CYCLE_PX := WALK_MOVE_FRAMES * MOVE_SPEED / WALK_FPS
-const ATTACK_FPS          := 97.5  # PRUEBA: 30% más rápido (antes 75) — el swing
-	# completo pasa de 0.75s a 0.57s, y el hit (frame 20) llega a los 0.21s en
-	# vez de 0.27s. Volver a 75 si se siente demasiado repentino para leer.
+const ATTACK_FPS          := 75.0  # antes 97.5 (30% más rápido que esto) —
+	# se sentía demasiado repentino para leer, vuelto al valor original.
 const ATTACK_FRAMES       := 56
 const KICK_FPS            := 60.0
 const KICK_FRAMES         := 73
@@ -112,6 +115,7 @@ var intro_walk_done      := false   # level1.gd hace polling de esto
 
 var attack_timer    := 0.0
 var _hit_recently_timer := 0.0
+var _hurt_from_finisher := false   # distingue el origen del HURT (ver react_to_finisher / react_to_jab)
 var walk_frame      := float(WALK_SKIP_START)   # arranca en walk_003
 var knockback_x     := 0.0
 var burst_timer     := 0.0
@@ -128,6 +132,12 @@ var _shadow: Sprite2D = null
 @onready var sprite:    AnimatedSprite2D = $AnimatedSprite2D
 @onready var collision: CollisionShape2D = $CollisionShape2D
 
+# Hitbox espejado según hacia dónde mira — igual técnica que el mozo (ver
+# waiter.gd _update_collision_facing). El valor base (.tscn) está calibrado
+# con el sprite sin flipear (facing_right = false); al mirar para la derecha
+# se invierte el offset en X para que el hitbox siga el lado real.
+var _base_collision_pos: Vector2 = Vector2.ZERO
+
 func _ready() -> void:
 	collision_layer = 4
 	collision_mask  = 1
@@ -136,6 +146,14 @@ func _ready() -> void:
 	# mismo su animación de muerte.
 	z_index = 2
 	add_to_group("enemy")
+	# CapsuleShape2D del .tscn es un sub-resource — sin duplicarlo, mover el
+	# hitbox de esta instancia movería el de cualquier otra que lo comparta.
+	collision.shape = collision.shape.duplicate()
+	_base_collision_pos = collision.position
+	for i in range(1, 7):
+		tex_hit_impact_frames.append(load("res://assets/sprites/vfx/hit_impact/hit_impact_%03d.png" % i))
+	for i in range(1, 10):
+		tex_knockback_dust_frames.append(load("res://assets/sprites/vfx/dust_jump/dust_jump_%03d.png" % i))
 	_load_sprites()
 	_build_hp_bar()
 	_create_shadow()
@@ -157,14 +175,18 @@ const SHADOW_TEX_W      := 1424.0
 const SHADOW_TEX_H      := 642.0
 const SHADOW_SCALE      := 0.142
 # Ajustes pedidos, acumulados: +10px izq/+30px der, después +5px izq/+30px der
-# más — cada vez, además de agrandar (TRIM, puede ir negativo si el ancho ya
-# superó SHADOW_SCALE de base) el centro se corre a la derecha la mitad de la
-# diferencia entre ambos lados.
-const SHADOW_WIDTH_TRIM := -27.0
-# Ajustes pedidos, acumulados: subir 40px, bajar 10px, bajar 8px más.
-const SHADOW_TOP_Y      := -180.0
-const SHADOW_BOTTOM_Y   := 60.0
-const SHADOW_X_OFFSET   := 12.5
+# más, después +10px der más, después +3px der más (esta vez pedido con el
+# boss mirando a la IZQUIERDA como referencia — ver _update_shadow_facing, el
+# offset de este último ajuste va con el signo invertido por eso) — cada vez,
+# además de agrandar (TRIM, puede ir negativo si el ancho ya superó
+# SHADOW_SCALE de base) el centro se corre la mitad de la diferencia entre
+# ambos lados.
+const SHADOW_WIDTH_TRIM := -40.0
+# Ajustes pedidos, acumulados: subir 40px, bajar 10px, bajar 8px más, bajar 5px más,
+# subida de vuelta 5px, agrandado 3px arriba y 3px abajo (centro sin mover), subida 4px más.
+const SHADOW_TOP_Y      := -187.0
+const SHADOW_BOTTOM_Y   := 59.0
+const SHADOW_X_OFFSET   := -4.0   # -2.5 - 1.5: +3px hacia la derecha del boss mirando a la izquierda (signo invertido, ver arriba)
 const SHADOW_ALPHA      := 0.68
 
 func _create_shadow() -> void:
@@ -307,7 +329,21 @@ func _physics_process(delta: float) -> void:
 
 	sprite.flip_h = facing_right
 	_update_anim(delta)
+	_update_shadow_facing()
+	_update_collision_facing()
 	move_and_slide()
+
+func _update_collision_facing() -> void:
+	collision.position.x = _base_collision_pos.x if not facing_right else -_base_collision_pos.x
+
+# SHADOW_X_OFFSET es un corrimiento asimétrico (calibrado mirando para la
+# derecha) — al dar vuelta hay que invertirlo, si no la sombra se queda
+# corrida siempre para el mismo lado sin importar hacia dónde mira ahora.
+func _update_shadow_facing() -> void:
+	if not _shadow: return
+	var sx := SHADOW_SCALE - SHADOW_WIDTH_TRIM / SHADOW_TEX_W
+	var x_off := SHADOW_X_OFFSET if facing_right else -SHADOW_X_OFFSET
+	_shadow.position.x = -SHADOW_TEX_W * sx * 0.5 + x_off
 
 func _update_anim(delta: float) -> void:
 	if state == State.ATTACK or state == State.KICK or state == State.HURT or state == State.DEAD:
@@ -435,14 +471,60 @@ func _do_approach(_delta: float) -> void:
 # piso) — la resta da la altura real por encima del piso.
 const AIRBORNE_DODGE_HEIGHT := 50.0
 
+func _spawn_hit_impact(at_position: Vector2) -> void:
+	var puff := DUST_PUFF_SCENE.instantiate() as Node2D
+	get_parent().add_child(puff)
+	puff.global_position = at_position
+	puff.z_index = 10   # por delante de todo, es un flash de impacto
+	puff.z_as_relative = false
+	if puff.has_method("play"):
+		puff.call("play", tex_hit_impact_frames, 22.0)
+
+func _spawn_knockback_dust(at_position: Vector2) -> void:
+	var puff := DUST_PUFF_SCENE.instantiate() as Node2D
+	get_parent().add_child(puff)
+	# Offsets pensados para cuando el PP mira a la derecha; se espejan solos
+	# para el otro lado (mismo criterio que los dust de player.gd).
+	var facing_right: bool = player.get("facing_right") if player else true
+	var dir := 1.0 if facing_right else -1.0
+	puff.global_position = at_position + Vector2(-dir * 40.0, -20.0)
+	# VFX pensado originalmente como polvo de salto (columnas verticales) —
+	# girado un cuarto de vuelta queda como una ráfaga horizontal, acompañando
+	# al PP volando hacia atrás por el empuje de la patada.
+	puff.rotation = deg_to_rad(90.0)
+	puff.z_index = 10
+	puff.z_as_relative = false
+	if puff.has_method("play"):
+		puff.call("play", tex_knockback_dust_frames, 20.0)
+
 func _hit_player(hit_range: float, dmg: int, knockback: float) -> void:
 	if not player: return
 	if _player_dist() > hit_range: return
 	if global_position.y - player.global_position.y > AIRBORNE_DODGE_HEIGHT: return
 	if not player.has_method("take_damage"): return
+	_spawn_hit_impact(player.global_position)
 	var from_right := player.global_position.x > global_position.x
+	# DEBUG_NO_DAMAGE_TO_PLAYER solo anula la vida, no el empuje — la patada
+	# de contragolpe (KICK_KNOCKBACK) tiene que seguir tirando al PP para atrás
+	# aunque no pueda morir, así se puede probar el reseteo de distancia real
+	# del patrón sin arriesgarse a morir en cada prueba. El bug real que esto
+	# había expuesto (el PP quedaba embebido en la cápsula del boss durante
+	# slide/crouch y el empuje lo sacaba de golpe) ya está arreglado en la raíz
+	# — la colisión física ahora frena al PP contra el boss en todo momento
+	# (ver collision_mask en player.gd, capas 4 vs 32), así que no hay overlap
+	# que resolver de golpe cuando llega este empuje.
 	var real_dmg := 0 if DEBUG_NO_DAMAGE_TO_PLAYER else dmg
 	player.call("take_damage", real_dmg, from_right, knockback)
+	# El empuje de la patada resetea la distancia después del remate del
+	# combo y tiene que pasar SIEMPRE — take_damage() de arriba respeta el
+	# iframe del PP (protección general contra golpes repetidos), así que si
+	# el PP ya venía golpeado hace menos de 1s (el machetazo, por ejemplo) el
+	# empuje se cancelaba en silencio ahí. Este segundo empuje es aparte, sin
+	# iframe, y solo importa cuando hay knockback real (el machetazo tiene
+	# KNOCKBACK=0, no le suma nada).
+	if knockback != 0.0 and player.has_method("apply_forced_knockback"):
+		player.call("apply_forced_knockback", knockback, from_right)
+		_spawn_knockback_dust(player.global_position)
 
 func _do_attack_state(delta: float) -> void:
 	velocity.x = move_toward(velocity.x, 0.0, 300.0 * delta)
@@ -473,15 +555,19 @@ func _on_animation_finished() -> void:
 			attack_timer = ATTACK_CDN
 			state = State.APPROACH
 		State.HURT:
-			# HURT solo se entra vía react_to_finisher (remate del combo del
-			# PP) — así que siempre corresponde el castigo real: contraataca
-			# directo con la patada, sin pasar por idle ni por la recuperación
-			# que había antes.
-			hit_landed    = false
-			sprite.speed_scale = 1.0
-			attack_timer  = ATTACK_CDN
-			state         = State.KICK
-			sprite.play("kick")
+			# HURT tiene dos orígenes distintos ahora (ver _hurt_from_finisher):
+			# el remate (react_to_finisher) sigue con el castigo real de
+			# siempre — contraataca directo con la patada. El jab
+			# (react_to_jab) es solo el flinch visual pedido: no encadena
+			# nada, vuelve a APPROACH normal.
+			if _hurt_from_finisher:
+				hit_landed    = false
+				sprite.speed_scale = 1.0
+				attack_timer  = ATTACK_CDN
+				state         = State.KICK
+				sprite.play("kick")
+			else:
+				state = State.APPROACH
 
 # Golpe genérico (jab/hook, run punch, slide, air kick): NO resta vida ni
 # interrumpe al boss ni lo hace reaccionar — la vida es "una barrita por
@@ -506,9 +592,40 @@ func react_to_finisher() -> void:
 	if hp <= 0:
 		_die()
 		return
+	_hurt_from_finisher = true
 	state = State.HURT
 	knockback_x = 0.0   # HURT_KNOCKBACK ya está en 0
 	sprite.speed_scale = 1.0
+	# stop() antes de play(): si "hurt" ya está sonando (interrumpiendo el
+	# flinch del jab/hook), sprite.play() con la MISMA animación no la
+	# reinicia sola — ver el mismo comentario en react_to_jab().
+	sprite.stop()
+	sprite.play("hurt")
+
+# Reacción al jab y al hook (1er y 2do golpe del combo): solo el flinch visual
+# de "hurt" pedido a mano — a diferencia del remate, no resta vida ni encadena
+# el contragolpe de patada (ver _hurt_from_finisher en _on_animation_finished).
+# Se llama además de (no en vez de) take_damage — ver _notify_jab_hit en
+# player.gd.
+#
+# A propósito NO excluye state == State.HURT (a diferencia de la versión
+# anterior): el jab dispara el hurt, y si el hook conecta mientras esa
+# animación todavía está sonando, la interrumpe y la reinicia — encadenando
+# jab→hurt→hook→hurt (de nuevo desde el principio). react_to_finisher, más
+# abajo, ya hacía exactamente esto mismo sin necesidad de tocarla: tampoco
+# excluye HURT, así que el remate interrumpe el hurt del hook igual y
+# encadena directo a la patada — el pedido de "jab interrumpido por hook,
+# interrumpido por el remate, y ahí sí queda como estaba" sale solo.
+func react_to_jab() -> void:
+	if state == State.DEAD or state == State.KICK or state == State.ATTACK: return
+	_hurt_from_finisher = false
+	state = State.HURT
+	knockback_x = 0.0
+	sprite.speed_scale = 1.0
+	# stop() antes de play(): si "hurt" ya está sonando (jab interrumpido por
+	# hook), sprite.play() con la MISMA animación no la reinicia sola — sigue
+	# desde donde iba. Sin este stop(), la interrupción pedida no se ve.
+	sprite.stop()
 	sprite.play("hurt")
 
 func _die() -> void:

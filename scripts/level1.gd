@@ -47,7 +47,7 @@ const WALL_LAYER := 16
 # (mismo camino que el escape real — ver Drone.escaped en drone.gd y el chequeo
 # en _process): te ahorrás la persecución y llegás en PIZZERIA_RUNWAY px nomás,
 # para iterar rápido en la pelea del boss. Volver a false para el flujo normal.
-const DEBUG_SKIP_DRONE_CHASE := true
+const DEBUG_SKIP_DRONE_CHASE := false
 
 # Con esto en true, el casillero de mozos no arranca nunca al llegar a la
 # arena — queda 1v1 solo contra el boss, para poder sentir su timing sin
@@ -136,6 +136,7 @@ var _intro_timer     := 0.0     # solo cuenta durante la pausa final, después d
 var _duel_active       := false
 var _duel_next_is_right := true   # qué lado le toca al próximo mozo
 var _duel_current: Node = null
+var _duel_respawn_timer: float = 0.0   # cuenta regresiva tras morir, antes de entrar el siguiente (ver _tick_first_duel)
 
 # ── Mozos: sistema de 2 casilleros (izquierda/derecha) ───────────────────────
 # DORMIDO por ahora (ver _first_duel_* arriba, que lo reemplaza para esta
@@ -148,8 +149,8 @@ var _duel_current: Node = null
 # rellenarse (ahí es 1v1 con el boss). Números en la línea de un beat-em-up
 # clásico (Streets of Rage/Final Fight): nunca más de 2 en pantalla, entran de
 # a uno con respiro, total acotado antes del boss real.
-const WAITER_TOTAL_CAP       := 8
-const WAITER_RESPAWN_DELAY   := 1.8   # pausa para respirar antes del reemplazo
+const WAITER_TOTAL_CAP       := 6
+const WAITER_RESPAWN_DELAY   := 3.6   # pausa para respirar antes del reemplazo
 const WAITER_INITIAL_STAGGER := 1.0   # la izquierda arranca 1s después que la derecha
 var _waiter_slots_active   := false
 var _waiters_spawned_total := 0
@@ -336,13 +337,14 @@ func _process(delta: float) -> void:
 			_escape_triggered = true
 			_trigger_pizzeria_ending(player.global_position.x, player.global_position.x + PIZZERIA_RUNWAY)
 
-	# El boss se reposiciona cada frame al mismo ritmo que un cop (parallax=1.2)
-	# — ver _boss_base_x. Esto corre TODO el tiempo, incluida la pelea: aunque
-	# la arena esté "sellada", la cámara igual sigue un poco al jugador dentro
-	# del margen (ver _seal_pizzeria_arena) — si el boss dejara de reaccionar a
-	# eso, se ve desincronizado del fondo (edificios/tráfico), que sí lo siguen
-	# haciendo. Solo se excluye durante INTRO_WALK (se mueve solo, caminando al
-	# centro) y DEAD (se queda clavado donde murió).
+	# El boss se reposiciona cada frame al mismo ritmo que un charco/cop
+	# (parallax=1.2) — ver _boss_base_x. Esto corre TODO el tiempo, incluida
+	# la pelea y DESPUÉS de muerto: aunque la arena esté "sellada", la cámara
+	# igual sigue un poco al jugador dentro del margen (ver
+	# _seal_pizzeria_arena) — si el boss (vivo o muerto) dejara de reaccionar
+	# a eso, se ve desincronizado del fondo (edificios/tráfico/charcos), que sí
+	# lo siguen haciendo. Solo se excluye durante INTRO_WALK (se mueve solo,
+	# caminando al centro, con su propia lógica de posición).
 	# _boss_base_x se recalcula en dos momentos para que esta fórmula caiga
 	# exacta en el punto donde el boss REALMENTE debe estar en ese instante:
 	# primero en _trigger_pizzeria_ending (ancla en _pizzeria_x, mientras se
@@ -352,7 +354,7 @@ func _process(delta: float) -> void:
 	# pausa antes de begin_combat), teletransportaría al boss de vuelta al 80%
 	# de pantalla, deshaciendo la entrada.
 	if _escape_triggered and _boss_node and cam \
-			and not (_boss_node.get("state") in [_BOSS_STATE_DEAD, _BOSS_STATE_INTRO_WALK]):
+			and _boss_node.get("state") != _BOSS_STATE_INTRO_WALK:
 		var boss_cam_x := cam.get_screen_center_position().x
 		_boss_node.position.x = _boss_base_x + boss_cam_x * (1.0 - BOSS_PARALLAX)
 
@@ -398,7 +400,7 @@ func _process(delta: float) -> void:
 	# _duel_active) — arranca recién cuando termina toda la intro de arriba,
 	# no durante el freeze.
 	if _duel_active:
-		_tick_first_duel()
+		_tick_first_duel(delta)
 
 	# Casilleros de mozos — dormido por ahora (ver _duel_* arriba, que lo reemplaza).
 	if _waiter_slots_active:
@@ -465,8 +467,10 @@ func _trigger_pizzeria_ending(escape_x: float, anchor_x: float) -> void:
 	# Para que el fondo no se sienta cortado, los edificios comunes generan
 	# SIN hueco hasta llegar a la pizzeria, y siguen 3 edificios más después de
 	# ella (hacia donde está el boss) antes de cortar la generación del todo.
-	var piz_left  := _pizzeria_x
-	var piz_right := _pizzeria_x
+	var piz_left    := _pizzeria_x
+	var piz_right   := _pizzeria_x
+	var after_first := _pizzeria_x   # borde derecho del primer edificio tras la pizzeria (ver más abajo)
+	var after_right := _pizzeria_x   # borde derecho del último edificio tras la pizzeria (ver más abajo)
 	const BUILDINGS_AFTER_PIZZERIA := 3
 	var buildings := get_node_or_null("BuildingsLayer")
 	if buildings:
@@ -481,7 +485,15 @@ func _trigger_pizzeria_ending(escape_x: float, anchor_x: float) -> void:
 		buildings.call("fill_to", piz_spawn_x)   # sin hueco antes de la pizzeria
 		piz_right = buildings.call("spawn_pizzeria", piz_spawn_x)
 		piz_left  = buildings.get("pizzeria_base_x")
-		var after_right: float = buildings.call("spawn_n_buildings", piz_right, BUILDINGS_AFTER_PIZZERIA)
+		# Se spawnea el primer edificio después de la pizzeria por separado (en vez
+		# de los 3 de una) para saber su borde derecho real (after_first) — hace
+		# falta para ocultar ahí también los faroles automáticos de la grilla fija
+		# de 500px, que caen en cualquier lado sin relación al ancho real de los
+		# edificios (random e1..e8.png) y a veces quedan pegados a un borde/detalle
+		# feo del primer edificio. Los edificios 2 y 3 no tienen este ajuste porque
+		# no hubo caso reportado ahí.
+		after_first = buildings.call("spawn_n_buildings", piz_right, 1)
+		after_right = buildings.call("spawn_n_buildings", after_first, BUILDINGS_AFTER_PIZZERIA - 1)
 		buildings.call("stop_at", after_right)
 
 	# Obstáculos (autos/cops/aéreos): cortan YA, en escape_x — la pista final es
@@ -492,10 +504,19 @@ func _trigger_pizzeria_ending(escape_x: float, anchor_x: float) -> void:
 	var traffic_rear := get_node_or_null("TrafficRearLayer")
 	if traffic_rear: traffic_rear.call("stop_at", _pizzeria_x)
 
-	# Farol: oculta los que caen sobre la pizzeria, agrega uno sobre el borde derecho
+	# Farol: oculta los que caen sobre la pizzeria (barrido único — ahí SÍ
+	# tiene que sobrevivir un farol de la grilla cruda, además del que se
+	# agrega a mano) y agrega uno sobre el borde derecho de la pizzeria.
 	var sl := get_node_or_null("StreetlampLayer")
 	if sl:
 		sl.call("finalize_for_pizzeria", piz_left - 100.0, piz_right + 100.0, piz_right - 35.0)
+		# El primer edificio post-pizzeria SÍ necesita exclusión PERMANENTE (no
+		# barrido único) — ver comentario largo en exclude_zone(), el problema
+		# real era de timing (PIZZERIA_RUNWAY=5000px vs lookahead de faroles de
+		# solo 2000px). Arranca en piz_right+100 (donde termina la zona de la
+		# pizzeria de arriba) para no pisarla ni dejar hueco entre las dos.
+		sl.call("exclude_zone", piz_right + 100.0, after_first + 30.0)
+		sl.call("stop_at", after_right)
 
 	if _boss_node:
 		_boss_node.position     = Vector2(boss_rest_x, BOSS_FLOOR_Y)
@@ -586,15 +607,21 @@ func _start_first_duel() -> void:
 	_duel_next_is_right = true
 	_duel_current        = _spawn_side_waiter(true)
 
-# Apenas muere el mozo actual, entra el siguiente por el lado contrario — y
+# Apenas muere el mozo actual, arranca una pausa (WAITER_RESPAWN_DELAY, "para
+# respirar") y recién al vencer entra el siguiente por el lado contrario — y
 # así indefinidamente. Se corta solo (sin más spawns) cuando el boss muere.
-func _tick_first_duel() -> void:
+func _tick_first_duel(delta: float) -> void:
 	if _boss_node and _boss_node.get("state") == _BOSS_STATE_DEAD:
 		_duel_active = false
 		return
 	if _duel_current and (not is_instance_valid(_duel_current) or _duel_current.get("state") == _WAITER_DEAD):
-		_duel_next_is_right = not _duel_next_is_right
-		_duel_current       = _spawn_side_waiter(_duel_next_is_right)
+		_duel_current        = null
+		_duel_next_is_right  = not _duel_next_is_right
+		_duel_respawn_timer  = WAITER_RESPAWN_DELAY
+	if _duel_current == null and _duel_respawn_timer > 0.0:
+		_duel_respawn_timer -= delta
+		if _duel_respawn_timer <= 0.0:
+			_duel_current = _spawn_side_waiter(_duel_next_is_right)
 
 # Un tick de los dos casilleros — ver comentario junto a las variables
 # _waiter_*. Sin abstraer en un loop a propósito: son solo dos, y así queda
@@ -637,14 +664,23 @@ func _prewarm_waiter_sprites() -> void:
 # is_right=false desde afuera del borde izquierdo.
 func _spawn_side_waiter(is_right: bool) -> Node:
 	var arena_w := _arena_right - _arena_left
-	var enter_x  := _arena_right + 220.0 if is_right else _arena_left - 220.0
+	# La cámara puede panear hasta CAMERA_MARGIN_FRAC más allá del borde de la
+	# arena (ver _seal_pizzeria_arena) — si el jugador corre hasta ese límite,
+	# el punto de entrada tiene que quedar más lejos todavía que eso, sumando
+	# margen extra para el ANCHO VISUAL del sprite (su hitbox es angosta,
+	# _WAITER_RADIUS=15.6, pero el dibujo del mozo es bastante más ancho). Antes
+	# esto era un fijo de 220px, que quedaba corto contra el margen de cámara
+	# (160px) + sprite: se lo veía aparecer si te anticipabas corriendo al borde.
+	var cam_margin   := arena_w * CAMERA_MARGIN_FRAC * 0.5
+	var entry_offset := cam_margin + 150.0
+	var enter_x  := _arena_right + entry_offset if is_right else _arena_left - entry_offset
 	var target_x := _arena_left + arena_w * (0.90 if is_right else 0.30)
 	var scenes := [WAITER_SCENE, WAITER_DARK_SCENE, WAITER_LIGHT_SCENE]
 	var waiter: Node = scenes[randi() % scenes.size()].instantiate()
 	(waiter as Node2D).position = Vector2(enter_x, WAITER_FLOOR_Y)
 	(waiter as Node2D).modulate = NIGHT_ENEMY
 	add_child(waiter)
-	waiter.call("start_entrance", target_x)
+	waiter.call("start_entrance", target_x, is_right)
 	# El de la derecha se mueve entre el boss y el borde derecho; el de la
 	# izquierda entre el borde izquierdo y el boss — ninguno cruza al otro
 	# lado del boss ni sale de la pantalla de la arena. El límite se calcula

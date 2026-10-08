@@ -21,6 +21,9 @@ var _rng := RandomNumberGenerator.new()
 var _lamp_head_x: float = 0.0
 var _lamp_head_y: float = 0.0
 var _gen_head_x:  float = 0.0
+var _stop_x:      float = -1.0   # -1 = infinito; ver stop_at()
+var _skip_from:   float = 1.0    # zona permanente sin faroles (ver finalize_for_pizzeria) — _skip_from > _skip_to = desactivada
+var _skip_to:     float = 0.0
 var _sprite_tex: Texture2D = null
 var _light_tex: GradientTexture2D = null
 var _cone_tex: ImageTexture = null
@@ -152,7 +155,32 @@ func _add_lamp(x: float) -> void:
 		"flicker_timer": 0.0,
 	})
 
-# Oculta los faroles sobre la pizzeria y agrega uno sobre el edificio derecho.
+# Corta la generación infinita a partir de x — igual patrón que stop_at() en
+# buildings_layer.gd. Sin esto, _process() sigue agregando faroles nuevos en la
+# grilla fija de 500px indefinidamente (incluso después de finalize_for_pizzeria),
+# así que un farol podía reaparecer en la zona que se acababa de ocultar apenas
+# la cámara avanzaba un poco más.
+func stop_at(x: float) -> void:
+	_stop_x = x
+
+# Excluye una zona de la grilla de faroles DE FORMA PERMANENTE — a diferencia
+# de finalize_for_pizzeria (barrido único, ver comentario ahí), esto lo
+# respeta también la generación infinita futura en _process(), sea cuando sea
+# que le toque generar esa posición de la grilla. Usar solo para zonas que
+# tienen que quedar vacías siempre (ej. el primer edificio después de la
+# pizzeria) — NO para la zona de la pizzeria en sí, que espera que sobreviva
+# un farol de la grilla cruda (ver finalize_for_pizzeria).
+func exclude_zone(from: float, to: float) -> void:
+	_skip_from = from
+	_skip_to   = to
+
+# Oculta los faroles sobre la pizzeria (barrido único, NO permanente — ver
+# exclude_zone() para la versión permanente) y agrega uno sobre el edificio
+# derecho. La zona de la pizzeria NO usa exclusión permanente a propósito:
+# los 2 faroles que se ven ahí en juego (uno de la grilla cruda + el agregado
+# a mano acá abajo) son el resultado esperado; si se vuelve permanente esta
+# zona también, el de la grilla cruda deja de aparecer y se pierde uno de los
+# dos (ya pasó, se revirtió).
 func finalize_for_pizzeria(skip_from: float, skip_to: float, extra_x: float) -> void:
 	for i in range(_lamps.size()):
 		if _base_x[i] >= skip_from and _base_x[i] <= skip_to:
@@ -234,8 +262,12 @@ func _process(delta: float) -> void:
 
 	# Generación infinita de faroles
 	var cam_base := cam.get_screen_center_position().x * parallax
-	while _gen_head_x < cam_base + spacing * 4:
-		_add_lamp(_gen_head_x)
+	var target_x := cam_base + spacing * 4
+	if _stop_x >= 0.0:
+		target_x = minf(target_x, _stop_x)
+	while _gen_head_x < target_x:
+		if _gen_head_x < _skip_from or _gen_head_x > _skip_to:
+			_add_lamp(_gen_head_x)
 		_gen_head_x += spacing
 
 	# Limpieza de faroles que quedaron atrás

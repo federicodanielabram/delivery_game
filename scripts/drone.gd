@@ -1,14 +1,11 @@
 extends Node2D
 
 @export var offset_y: float = -200.0
-@export var drone_speed: float = 300.0       # px/s — tope de persecución. TEMPORAL PARA PRUEBAS: más
-											  # bajo que lo normal para que sea más fácil alejarse
-											  # (729-300=429px/s). Valor de referencia a restaurar
-											  # cuando terminen las pruebas: 633.0 (comentario original
-											  # abajo en separation_rate explica el porqué de 633).
-@export var separation_rate: float = 96.0    # = a lo que te alejás corriendo (729-drone_speed). Te
-											  # alcanza a separation_rate*0.1 = 9.6px/s (un décimo)
-											  # cuando frenás o te trabás
+@export var drone_speed: float = 500.0       # px/s — tope de persecución, siempre a fondo (sin
+											  # amortiguar cuando te alcanza): corriendo a fondo deja
+											  # 729-500=229px/s de separación neta; si frenás o te
+											  # trabás, el dron viene directo a drone_speed hasta
+											  # rest_x, sin el crawl lento que tenía antes.
 @export var max_escape_dist: float = 4800.0  # distancia de escape en px (triple, para que el recorrido más largo venda más la sensación de velocidad al recuperar)
 @export var rest_offset: float = 120.0       # px a la izquierda del PP en reposo; cámara tiene +384 offset → PP aparece en x=256 desde borde izq
 @export var tilt_factor: float = 0.003
@@ -18,8 +15,6 @@ extends Node2D
 
 var _target: Node2D
 var _anim: AnimatedSprite2D
-var _prev_x: float = 0.0
-var _target_prev_x: float = 0.0
 var _light_main: PointLight2D
 var _light_fill: PointLight2D
 var _light_red: PointLight2D
@@ -35,6 +30,22 @@ var _cone_x: float = 0.0
 var _cone_vel: float = 0.0
 
 var escaped: bool = false
+
+# ── Sonido de movimiento: máquina de estados independiente de la física real
+# del dron (ver _update_motion_sound) — QUIET/ACCEL/CRUISE/DECEL, con ACCEL y
+# DECEL durando siempre 1 segundo fijo (SoundState.TRANSITION_DUR), sin importar
+# la velocidad real. Simple a propósito: evita casos borde de sincronizar
+# sonido con la física (rebotes, aceleración real, etc.).
+enum SoundState { QUIET, ACCEL, CRUISE, DECEL }
+const SOUND_TRANSITION_DUR := 1.0
+const MOVING_THRESHOLD     := 1.0   # px de dir_x — por debajo, se considera "quieto" para el sonido
+var _sound_state  := SoundState.QUIET
+var _sound_timer  := 0.0
+var _quiet_player: AudioStreamPlayer
+var _accel_player: AudioStreamPlayer
+var _cruise_player: AudioStreamPlayer
+var _decel_player: AudioStreamPlayer
+var _debug_timer := 0.0
 
 func get_gap() -> float:
 	if not _target: return 0.0
@@ -172,32 +183,105 @@ func _ready() -> void:
 
 	if _target:
 		global_position = Vector2(_target.global_position.x - rest_offset, _target.global_position.y + offset_y)
-		_prev_x = global_position.x
-		_target_prev_x = _target.global_position.x
 		_cone_x = _target.global_position.x
+
+	# Los 4 .wav vienen de la misma sesión de grabación, todos ~14.5-15dB por
+	# debajo de 0dBFS de pico — el boost por archivo los lleva justo a 0dB de
+	# pico (sin clipear) para que ninguno se escuche más fuerte que otro.
+	_quiet_player  = _make_loop_player("res://assets/sounds/drone/drone_quieto.wav", 14.5)
+	_accel_player  = _make_loop_player("res://assets/sounds/drone/drone_acelerar.wav", 15.0)
+	_cruise_player = _make_loop_player("res://assets/sounds/drone/drone_crucero.wav", 14.9)
+	_decel_player  = _make_loop_player("res://assets/sounds/drone/drone_desacelerar.wav", 15.0)
+
+func _make_loop_player(path: String, volume_db: float) -> AudioStreamPlayer:
+	var player := AudioStreamPlayer.new()
+	if ResourceLoader.exists(path):
+		player.stream = load(path)
+		player.volume_db = volume_db
+		player.finished.connect(func():
+			if _sound_players()[_sound_state] == player: player.play()
+		)
+	add_child(player)
+	return player
+
+func _sound_players() -> Dictionary:
+	return {
+		SoundState.QUIET:  _quiet_player,
+		SoundState.ACCEL:  _accel_player,
+		SoundState.CRUISE: _cruise_player,
+		SoundState.DECEL:  _decel_player,
+	}
+
+# Máquina de estados de sonido, totalmente aparte de la física del dron:
+# QUIET -> (empieza a moverse) -> ACCEL (1s fijo) -> CRUISE (si sigue
+# moviéndose) o QUIET (si ya se frenó) -> ... -> DECEL se dispara de forma
+# PREDICTIVA: no cuando ya se detuvo, sino cuando a la distancia/velocidad
+# actual, falta ~1 segundo para llegar a destino (time_to_rest, ver
+# _process) -> DECEL dura ese mismo 1s fijo -> termina justo cuando el dron
+# llega -> QUIET (o vuelve a ACCEL si el PP se alejó de nuevo antes de que
+# termine ese segundo).
+func _update_motion_sound(delta: float, is_moving: bool, time_to_rest: float) -> void:
+	match _sound_state:
+		SoundState.QUIET:
+			if is_moving:
+				_set_sound_state(SoundState.ACCEL)
+		SoundState.CRUISE:
+			if not is_moving:
+				_set_sound_state(SoundState.QUIET)
+			elif time_to_rest <= SOUND_TRANSITION_DUR:
+				_set_sound_state(SoundState.DECEL)
+		SoundState.ACCEL:
+			_sound_timer -= delta
+			if _sound_timer <= 0.0:
+				if not is_moving:
+					_set_sound_state(SoundState.QUIET)
+				elif time_to_rest <= SOUND_TRANSITION_DUR:
+					_set_sound_state(SoundState.DECEL)
+				else:
+					_set_sound_state(SoundState.CRUISE)
+		SoundState.DECEL:
+			if time_to_rest > SOUND_TRANSITION_DUR:
+				_set_sound_state(SoundState.ACCEL)
+			else:
+				_sound_timer -= delta
+				if _sound_timer <= 0.0:
+					_set_sound_state(SoundState.QUIET)
+
+func _set_sound_state(new_state: SoundState) -> void:
+	var players := _sound_players()
+	var old_player: AudioStreamPlayer = players[_sound_state]
+	var new_player: AudioStreamPlayer = players[new_state]
+	if old_player != new_player and old_player.playing: old_player.stop()
+	_sound_state = new_state
+	_sound_timer = SOUND_TRANSITION_DUR
+	if new_player.stream and not new_player.playing: new_player.play()
 
 func _process(delta: float) -> void:
 	if not _target: return
-	if escaped: return
+	if escaped:
+		var p: AudioStreamPlayer = _sound_players()[_sound_state]
+		if p.playing: p.stop()
+		return
 
-	# Persecución bidireccional: el dron mantiene rest_offset px a la izquierda del PP.
-	# La velocidad efectiva se deriva de la velocidad HORIZONTAL REAL del PP, medida
-	# por desplazamiento de posición cuadro a cuadro (no por CharacterBody2D.velocity):
-	# en una pendiente (rampa) la física redirige parte de esa velocidad hacia arriba
-	# para seguir la superficie, así que .velocity.x reportado baja aunque el PP siga
-	# corriendo a fondo — eso hacía que el dron "sintiera" que frenaste y te alcanzara
-	# de más en la rampa. Midiendo la posición nos independizamos de esa distorsión.
-	# A un décimo del ritmo (separation_rate*0.1) cuando el PP frena o se traba: te
-	# alcanza mucho más despacio que lo que te separás corriendo, sin golpe de
-	# velocidad tope inmediato. Mientras corrés, sigue igual (tope drone_speed).
-	# TODO post-pruebas: multiplicador a *4.0 (además de drone_speed=633 arriba).
-	var player_vx: float = maxf((_target.global_position.x - _target_prev_x) / delta, 0.0)
-	_target_prev_x = _target.global_position.x
-	var eff_speed: float = minf(drone_speed, player_vx + separation_rate * 0.1)
-
+	# Persecución bidireccional: el dron mantiene rest_offset px a la izquierda
+	# del PP, viajando hasta drone_speed a fondo — movimiento simple, sin rampa
+	# física (el sonido de arranque/frenado es un timer aparte, ver
+	# _update_motion_sound, no está atado a esto).
 	var rest_x := _target.global_position.x - rest_offset
 	var dir_x := rest_x - global_position.x
-	global_position.x += clampf(dir_x, -eff_speed * delta, eff_speed * delta)
+	var move_step := clampf(dir_x, -drone_speed * delta, drone_speed * delta)
+	global_position.x += move_step
+
+	# Tiempo estimado hasta llegar a rest_x a la velocidad actual — es lo que
+	# dispara DECEL de forma predictiva (ver _update_motion_sound), no recién
+	# cuando ya está parado.
+	var time_to_rest := absf(dir_x) / drone_speed if drone_speed > 0.0 else 0.0
+	_update_motion_sound(delta, absf(dir_x) >= MOVING_THRESHOLD, time_to_rest)
+
+	_debug_timer += delta
+	if _debug_timer >= 1.0:
+		_debug_timer = 0.0
+		print("[drone] state=%s dir_x=%.2f" % [SoundState.keys()[_sound_state], dir_x])
 
 	# Escape: si el PP logra alejarse max_escape_dist del dron
 	var gap := get_gap()
@@ -210,9 +294,7 @@ func _process(delta: float) -> void:
 	global_position.y = lerpf(global_position.y, target_y, 3.0 * delta)
 
 	# Tilt según velocidad horizontal
-	var vel_x := (global_position.x - _prev_x) / delta
-	_prev_x = global_position.x
-	var target_tilt := clampf(vel_x * tilt_factor, -tilt_max, tilt_max)
+	var target_tilt := clampf((move_step / delta) * tilt_factor, -tilt_max, tilt_max)
 	_anim.rotation = lerpf(_anim.rotation, target_tilt, tilt_speed * delta)
 
 	# Bob

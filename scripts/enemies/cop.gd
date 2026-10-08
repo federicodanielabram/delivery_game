@@ -1,5 +1,8 @@
 extends CharacterBody2D
 
+const DUST_PUFF_SCENE := preload("res://scenes/vfx/DustPuff.tscn")
+var tex_hit_impact_frames: Array[Texture2D] = []
+
 const GRAVITY        := 850.0
 const PARALLAX       := 1.2   # tiene que matchear el parallax de car_mid_layer.gd
 const MAX_HP         := 8
@@ -51,7 +54,14 @@ var _contact_area: Area2D = null
 @onready var collision: CollisionShape2D = $CollisionShape2D
 
 func _ready() -> void:
-	collision_layer = 4
+	# Capa distinta si es un cop-obstáculo de tráfico (32) que si es un cop de
+	# combate real (4, la misma que boss/mozo) — obstacle_mode ya viene seteado
+	# desde car_mid_layer.gd ANTES de add_child, así que acá ya es confiable.
+	# Por qué: player.gd necesita poder excluir a los cops-obstáculo de su
+	# colisión física durante slide/crouch (para pasarlos por debajo) sin
+	# excluir también al boss/mozo — si compartieran la misma capa no habría
+	# forma de distinguirlos a nivel físico.
+	collision_layer = 32 if obstacle_mode else 4
 	collision_mask  = 1
 	# z_index=1: por debajo de los autos/buses/camiones de CarMidLayer (z=2). El
 	# cop se agrega como hermano de esa capa, no hijo, así que a igual z_index
@@ -61,6 +71,8 @@ func _ready() -> void:
 	add_to_group("enemy")
 	add_to_group("cop")
 	patrol_origin = global_position
+	for i in range(1, 7):
+		tex_hit_impact_frames.append(load("res://assets/sprites/vfx/hit_impact/hit_impact_%03d.png" % i))
 	_load_sprites()
 	_build_hp_bar()
 	_create_shadow()
@@ -128,6 +140,15 @@ func _create_shadow() -> void:
 	_shadow.modulate.a = SHADOW_ALPHA
 	add_child(_shadow)
 	move_child(_shadow, 0)
+
+# SHADOW_X_OFFSET es un corrimiento asimétrico (calibrado mirando para la
+# derecha) — al dar vuelta hay que invertirlo, si no la sombra se queda
+# corrida siempre para el mismo lado sin importar hacia dónde mira ahora.
+func _update_shadow_facing() -> void:
+	if not _shadow: return
+	var sx := SHADOW_SCALE - SHADOW_WIDTH_TRIM / SHADOW_TEX_W
+	var x_off := SHADOW_X_OFFSET if facing_right else -SHADOW_X_OFFSET
+	_shadow.position.x = -SHADOW_TEX_W * sx * 0.5 + x_off
 
 func _find_player() -> void:
 	player = get_tree().get_first_node_in_group("player") as CharacterBody2D
@@ -261,6 +282,7 @@ func _physics_process(delta: float) -> void:
 		sprite.position.x = lerpf(idle_x, walk_x, t)
 	else:
 		sprite.position.x = 45.0 if not facing_right else -35.0
+	_update_shadow_facing()
 	move_and_slide()
 	if _cam_ready:
 		_parallax_base_x = global_position.x - cam_x * (1.0 - PARALLAX)
@@ -317,11 +339,21 @@ func _do_attack(delta: float) -> void:
 		_attack_hit_done = true
 		_try_hit_player()
 
+func _spawn_hit_impact(at_position: Vector2) -> void:
+	var puff := DUST_PUFF_SCENE.instantiate() as Node2D
+	get_parent().add_child(puff)
+	puff.global_position = at_position
+	puff.z_index = 10   # por delante de todo, es un flash de impacto
+	puff.z_as_relative = false
+	if puff.has_method("play"):
+		puff.call("play", tex_hit_impact_frames, 22.0)
+
 func _try_hit_player() -> void:
 	if not player: return
 	if _player_dist() > ATTACK_RANGE + 20.0: return
 	if player.has_method("take_damage"):
 		player.take_damage(1, facing_right, 0.0)
+		_spawn_hit_impact(player.global_position)
 
 func _do_hurt(delta: float) -> void:
 	velocity.x  = knockback.x
